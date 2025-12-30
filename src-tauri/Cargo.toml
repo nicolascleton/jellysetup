@@ -1,0 +1,60 @@
+[package]
+name = "jellysetup"
+version = "1.0.0"
+description = "Raspberry Pi Media Center Setup Tool"
+authors = ["Nicolas Cleton"]
+license = "MIT"
+repository = "https://github.com/nicolascleton/jellysetup"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "1.5", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "1.5", features = ["shell-open", "dialog-all", "notification-all", "process-all"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# SSH
+russh = "0.40"
+russh-keys = "0.40"
+
+# HTTP client (pour télécharger l'image)
+reqwest = { version = "0.11", features = ["stream", "json"] }
+
+# SD Card operations
+sysinfo = "0.30"
+
+# Crypto (pour chiffrement clés SSH)
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+base64 = "0.21"
+
+# Network discovery (mDNS)
+mdns-sd = "0.10"
+
+# Progress and logging
+indicatif = "0.17"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS specific disk operations
+core-foundation = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Windows specific disk operations
+windows = { version = "0.52", features = ["Win32_Storage_FileSystem", "Win32_System_Ioctl"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,392 @@
+{
+  "version": "1.0.0",
+  "name": "Media Stack Installation",
+  "description": "Installation complète du media stack sur Raspberry Pi 5",
+  "estimatedTime": "15-20 minutes",
+  "requirements": {
+    "minRam": 4,
+    "minStorage": 32,
+    "os": "Raspberry Pi OS Lite (64-bit)"
+  },
+  "steps": [
+    {
+      "id": "system_update",
+      "name": "Mise à jour système",
+      "description": "Met à jour les paquets système",
+      "commands": [
+        "sudo apt update",
+        "sudo apt upgrade -y",
+        "sudo apt install -y jq curl git"
+      ],
+      "timeout": 300,
+      "retries": 2,
+      "critical": true
+    },
+    {
+      "id": "install_docker",
+      "name": "Installation Docker",
+      "description": "Installe Docker et Docker Compose",
+      "commands": [
+        "curl -fsSL https://get.docker.com | sh",
+        "sudo usermod -aG docker $USER"
+      ],
+      "timeout": 180,
+      "retries": 2,
+      "critical": true,
+      "requiresReboot": true
+    },
+    {
+      "id": "clone_repo",
+      "name": "Récupération configuration",
+      "description": "Clone le repo avec les configurations",
+      "commands": [
+        "git clone https://github.com/nicolascleton/media-stack-fleet.git ~/media-stack-fleet"
+      ],
+      "timeout": 60,
+      "retries": 3,
+      "critical": true
+    },
+    {
+      "id": "create_structure",
+      "name": "Création structure",
+      "description": "Crée les dossiers nécessaires",
+      "commands": [
+        "mkdir -p ~/media-stack/{decypharr,jellyfin,radarr,sonarr,prowlarr,jellyseerr,bazarr,scripts,logs}",
+        "sudo mkdir -p /mnt/decypharr",
+        "sudo chown $USER:$USER /mnt/decypharr"
+      ],
+      "timeout": 30,
+      "critical": true
+    },
+    {
+      "id": "generate_decypharr_config",
+      "name": "Configuration Decypharr",
+      "description": "Génère la configuration AllDebrid",
+      "type": "template",
+      "template": "decypharr-config.json.j2",
+      "output": "~/media-stack/decypharr/config.json",
+      "variables": ["alldebrid_api_key", "pi_ip"],
+      "critical": true
+    },
+    {
+      "id": "generate_compose",
+      "name": "Configuration Docker Compose",
+      "description": "Génère le fichier docker-compose.yml",
+      "type": "template",
+      "template": "docker-compose.yml.j2",
+      "output": "~/media-stack/docker-compose.yml",
+      "variables": ["pi_name", "pi_ip", "cloudflare_token"],
+      "critical": true
+    },
+    {
+      "id": "start_containers",
+      "name": "Démarrage services",
+      "description": "Démarre tous les containers Docker",
+      "commands": [
+        "cd ~/media-stack && docker compose up -d"
+      ],
+      "timeout": 300,
+      "retries": 2,
+      "critical": true
+    },
+    {
+      "id": "wait_services",
+      "name": "Attente des services",
+      "description": "Attend que tous les services soient prêts",
+      "type": "wait",
+      "services": [
+        {"name": "Radarr", "port": 7878, "path": "/api/v3/system/status"},
+        {"name": "Sonarr", "port": 8989, "path": "/api/v3/system/status"},
+        {"name": "Prowlarr", "port": 9696, "path": "/api/v1/system/status"},
+        {"name": "Jellyfin", "port": 8096, "path": "/health"},
+        {"name": "Decypharr", "port": 8282, "path": "/"}
+      ],
+      "timeout": 120,
+      "critical": true
+    },
+    {
+      "id": "get_api_keys",
+      "name": "Récupération API Keys",
+      "description": "Récupère les clés API générées",
+      "commands": [
+        "RADARR_API=$(grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/radarr/config.xml)",
+        "SONARR_API=$(grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/sonarr/config.xml)",
+        "PROWLARR_API=$(grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/prowlarr/config.xml)"
+      ],
+      "outputs": ["RADARR_API", "SONARR_API", "PROWLARR_API"],
+      "critical": true
+    },
+    {
+      "id": "update_decypharr",
+      "name": "Mise à jour Decypharr",
+      "description": "Injecte les vraies API keys dans Decypharr",
+      "type": "json_patch",
+      "file": "~/media-stack/decypharr/config.json",
+      "patches": [
+        {"path": "/arrs/0/token", "value": "${RADARR_API}"},
+        {"path": "/arrs/1/token", "value": "${SONARR_API}"}
+      ],
+      "postCommands": ["docker restart decypharr"],
+      "critical": true
+    },
+    {
+      "id": "configure_radarr",
+      "name": "Configuration Radarr",
+      "description": "Configure Radarr avec Decypharr",
+      "type": "api_calls",
+      "baseUrl": "http://localhost:7878/api/v3",
+      "apiKeyVar": "RADARR_API",
+      "calls": [
+        {
+          "method": "POST",
+          "path": "/rootfolder",
+          "body": {"path": "/mnt/decypharr/qbit/radarr"}
+        },
+        {
+          "method": "POST",
+          "path": "/downloadclient",
+          "body": {
+            "name": "Decypharr",
+            "implementation": "QBittorrent",
+            "configContract": "QBittorrentSettings",
+            "enable": true,
+            "protocol": "torrent",
+            "fields": [
+              {"name": "host", "value": "localhost"},
+              {"name": "port", "value": 8282},
+              {"name": "movieCategory", "value": "radarr"}
+            ]
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/config/naming",
+          "body": {
+            "renameMovies": true,
+            "replaceIllegalCharacters": true,
+            "standardMovieFormat": "{Movie Title} ({Release Year}) [{Quality Full}]",
+            "movieFolderFormat": "{Movie Title} ({Release Year})"
+          }
+        }
+      ],
+      "critical": true
+    },
+    {
+      "id": "configure_sonarr",
+      "name": "Configuration Sonarr",
+      "description": "Configure Sonarr avec Decypharr",
+      "type": "api_calls",
+      "baseUrl": "http://localhost:8989/api/v3",
+      "apiKeyVar": "SONARR_API",
+      "calls": [
+        {
+          "method": "POST",
+          "path": "/rootfolder",
+          "body": {"path": "/mnt/decypharr/qbit/tv-sonarr"}
+        },
+        {
+          "method": "POST",
+          "path": "/downloadclient",
+          "body": {
+            "name": "Decypharr",
+            "implementation": "QBittorrent",
+            "configContract": "QBittorrentSettings",
+            "enable": true,
+            "protocol": "torrent",
+            "fields": [
+              {"name": "host", "value": "localhost"},
+              {"name": "port", "value": 8282},
+              {"name": "tvCategory", "value": "tv-sonarr"}
+            ]
+          }
+        },
+        {
+          "method": "PUT",
+          "path": "/config/naming",
+          "body": {
+            "renameEpisodes": true,
+            "replaceIllegalCharacters": true,
+            "standardEpisodeFormat": "{Series TitleYear} - S{season:00}E{episode:00} - {Episode CleanTitle} [{Quality Full}]"
+          }
+        }
+      ],
+      "critical": true
+    },
+    {
+      "id": "configure_prowlarr",
+      "name": "Configuration Prowlarr",
+      "description": "Connecte Prowlarr à Radarr/Sonarr",
+      "type": "api_calls",
+      "baseUrl": "http://localhost:9696/api/v1",
+      "apiKeyVar": "PROWLARR_API",
+      "calls": [
+        {
+          "method": "POST",
+          "path": "/applications",
+          "body": {
+            "name": "Radarr",
+            "implementation": "Radarr",
+            "configContract": "RadarrSettings",
+            "syncLevel": "fullSync",
+            "fields": [
+              {"name": "prowlarrUrl", "value": "http://localhost:9696"},
+              {"name": "baseUrl", "value": "http://localhost:7878"},
+              {"name": "apiKey", "value": "${RADARR_API}"}
+            ]
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/applications",
+          "body": {
+            "name": "Sonarr",
+            "implementation": "Sonarr",
+            "configContract": "SonarrSettings",
+            "syncLevel": "fullSync",
+            "fields": [
+              {"name": "prowlarrUrl", "value": "http://localhost:9696"},
+              {"name": "baseUrl", "value": "http://localhost:8989"},
+              {"name": "apiKey", "value": "${SONARR_API}"}
+            ]
+          }
+        }
+      ],
+      "critical": true
+    },
+    {
+      "id": "configure_jellyfin",
+      "name": "Configuration Jellyfin",
+      "description": "Configure Jellyfin avec le compte admin",
+      "type": "jellyfin_setup",
+      "variables": ["jellyfin_username", "jellyfin_password"],
+      "libraries": [
+        {"name": "Films", "type": "movies", "path": "/mnt/decypharr/qbit/radarr"},
+        {"name": "Séries", "type": "tvshows", "path": "/mnt/decypharr/qbit/tv-sonarr"}
+      ],
+      "critical": true
+    },
+    {
+      "id": "configure_jellyseerr",
+      "name": "Configuration Jellyseerr",
+      "description": "Connecte Jellyseerr à Jellyfin/Radarr/Sonarr",
+      "type": "api_calls",
+      "baseUrl": "http://localhost:5055/api/v1",
+      "calls": [
+        {
+          "method": "POST",
+          "path": "/settings/initialize"
+        },
+        {
+          "method": "POST",
+          "path": "/settings/jellyfin",
+          "body": {
+            "hostname": "${PI_IP}",
+            "port": 8096,
+            "useSsl": false,
+            "apiKey": "${JELLYFIN_API}"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/settings/radarr",
+          "body": {
+            "name": "Radarr",
+            "hostname": "localhost",
+            "port": 7878,
+            "apiKey": "${RADARR_API}",
+            "isDefault": true
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/settings/sonarr",
+          "body": {
+            "name": "Sonarr",
+            "hostname": "localhost",
+            "port": 8989,
+            "apiKey": "${SONARR_API}",
+            "isDefault": true
+          }
+        }
+      ],
+      "critical": true
+    },
+    {
+      "id": "configure_flaresolverr",
+      "name": "Configuration FlareSolverr",
+      "description": "Connecte FlareSolverr à Prowlarr",
+      "type": "api_calls",
+      "baseUrl": "http://localhost:9696/api/v1",
+      "apiKeyVar": "PROWLARR_API",
+      "calls": [
+        {
+          "method": "POST",
+          "path": "/indexerProxy",
+          "body": {
+            "name": "FlareSolverr",
+            "implementation": "FlareSolverr",
+            "configContract": "FlareSolverrSettings",
+            "fields": [
+              {"name": "host", "value": "http://flaresolverr:8191"},
+              {"name": "requestTimeout", "value": 60}
+            ]
+          }
+        }
+      ],
+      "critical": false
+    },
+    {
+      "id": "add_ygg_indexer",
+      "name": "Ajout indexeur YGG",
+      "description": "Ajoute YGG comme indexeur",
+      "condition": "ygg_passkey",
+      "type": "api_calls",
+      "baseUrl": "http://localhost:9696/api/v1",
+      "apiKeyVar": "PROWLARR_API",
+      "calls": [
+        {
+          "method": "POST",
+          "path": "/indexer",
+          "body": {
+            "name": "YGG",
+            "implementation": "Cardigann",
+            "configContract": "CardigannSettings",
+            "enable": true,
+            "protocol": "torrent",
+            "definitionName": "yggtorrent",
+            "fields": [
+              {"name": "definitionFile", "value": "yggtorrent"},
+              {"name": "passkey", "value": "${YGG_PASSKEY}"}
+            ]
+          }
+        }
+      ],
+      "critical": false
+    },
+    {
+      "id": "enable_transcoding",
+      "name": "Activation transcoding",
+      "description": "Active le transcoding matériel V4L2",
+      "commands": [
+        "sed -i 's/<HardwareAccelerationType>none/<HardwareAccelerationType>v4l2/' ~/media-stack/jellyfin/config/encoding.xml 2>/dev/null || true",
+        "docker restart jellyfin"
+      ],
+      "critical": false
+    },
+    {
+      "id": "final_summary",
+      "name": "Finalisation",
+      "description": "Génère le résumé de l'installation",
+      "type": "summary",
+      "services": [
+        {"name": "Jellyfin", "port": 8096},
+        {"name": "Jellyseerr", "port": 5055},
+        {"name": "Radarr", "port": 7878},
+        {"name": "Sonarr", "port": 8989},
+        {"name": "Prowlarr", "port": 9696},
+        {"name": "Bazarr", "port": 6767},
+        {"name": "Decypharr", "port": 8282}
+      ]
+    }
+  ]
+}
