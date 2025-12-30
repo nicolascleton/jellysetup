@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowLeft, ArrowRight, Eye, EyeOff, ExternalLink, Wifi, Key, User, Info, Monitor, Globe } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Eye, EyeOff, ExternalLink, Wifi, Key, User, Info, Monitor } from 'lucide-react';
 import { open } from '@tauri-apps/api/shell';
 import { Config } from '../../lib/store';
 

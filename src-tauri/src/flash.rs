@@ -9,6 +9,9 @@ use tauri::Window;
 use tokio::process::Command;
 
 #[cfg(target_os = "macos")]
+extern crate libc;
+
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 
 // Protection contre les lancements multiples
@@ -485,28 +488,43 @@ async fn write_image_to_sd(_window: &Window, image: &Path, sd_path: &str) -> Res
                     break;
                 }
                 Ok(None) => {
-                    // Processus toujours en cours - lire le log de progression
+                    // Processus toujours en cours - envoyer SIGINFO pour obtenir la progression
                     let elapsed = start_time.elapsed().as_secs();
                     let mut total_written: u64 = 0;
 
+                    // Envoyer SIGINFO au process dd pour qu'il écrive sa progression
+                    if let Ok(output) = std::process::Command::new("pgrep")
+                        .args(["-f", "dd if=.*raspios"])
+                        .output()
+                    {
+                        if let Ok(pid_str) = String::from_utf8(output.stdout) {
+                            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                                unsafe { libc::kill(pid, libc::SIGINFO); }
+                            }
+                        }
+                    }
+
+                    // Attendre un peu que dd écrive dans le log
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
                     // Lire les dernières lignes du log dd
-                    // Format dd: "1073741824 bytes (1.1 GB, 1.0 GiB) copied, 167.5 s, 6.4 MB/s"
+                    // Format SIGINFO: "2841640960 bytes transferred in 997.746971 secs (2848058 bytes/sec)"
                     if let Ok(log_content) = std::fs::read_to_string(&log_path) {
                         // Chercher la dernière ligne avec des bytes
                         for line in log_content.lines().rev() {
-                            if line.contains("bytes") && line.contains("copied") {
-                                // Parser: "1073741824 bytes (1.1 GB..."
+                            if line.contains("bytes") && line.contains("transferred") {
+                                // Parser: "2841640960 bytes transferred..."
                                 if let Some(bytes_str) = line.split_whitespace().next() {
                                     if let Ok(bytes) = bytes_str.parse::<u64>() {
                                         total_written = bytes;
                                     }
                                 }
-                                // Parser vitesse: "... 6.4 MB/s"
-                                if let Some(speed_part) = line.split(',').last() {
-                                    let speed_str = speed_part.trim().replace(" MB/s", "");
-                                    if let Ok(speed) = speed_str.parse::<f64>() {
-                                        if speed > 0.5 {
-                                            current_speed = speed;
+                                // Parser vitesse: "... (2848058 bytes/sec)"
+                                if let Some(start) = line.rfind('(') {
+                                    if let Some(end) = line.rfind(" bytes/sec)") {
+                                        let speed_str = &line[start+1..end];
+                                        if let Ok(bytes_per_sec) = speed_str.parse::<f64>() {
+                                            current_speed = bytes_per_sec / 1_000_000.0; // Convertir en MB/s
                                         }
                                     }
                                 }
@@ -520,8 +538,8 @@ async fn write_image_to_sd(_window: &Window, image: &Path, sd_path: &str) -> Res
                         total_written = elapsed * (current_speed as u64 * 1_000_000);
                     }
 
-                    // Calculer le pourcentage (plafonné à 95%)
-                    let percent = ((total_written as f64 / image_size as f64) * 100.0).min(95.0) as u32;
+                    // Calculer le pourcentage RÉEL (pas de plafond artificiel)
+                    let percent = ((total_written as f64 / image_size as f64) * 100.0).min(99.0) as u32;
 
                     // Calculer le temps restant estimé
                     let remaining_bytes = image_size.saturating_sub(total_written);

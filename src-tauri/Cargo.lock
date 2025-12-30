@@ -2235,6 +2235,7 @@ dependencies = [
  "dotenv",
  "futures-util",
  "indicatif",
+ "libc",
  "mdns-sd",
  "rand 0.8.5",
  "regex",
