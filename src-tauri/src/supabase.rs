@@ -2,8 +2,19 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-const SUPABASE_URL: &str = "https://your-project.supabase.co";
-const SUPABASE_ANON_KEY: &str = "your-anon-key";
+// Ces valeurs sont injectées au build via .env
+// Pour build: créer .env avec SUPABASE_URL et SUPABASE_ANON_KEY
+fn get_supabase_url() -> String {
+    option_env!("SUPABASE_URL")
+        .unwrap_or("https://your-project.supabase.co")
+        .to_string()
+}
+
+fn get_supabase_key() -> String {
+    option_env!("SUPABASE_ANON_KEY")
+        .unwrap_or("your-anon-key")
+        .to_string()
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Installation {
@@ -35,10 +46,13 @@ pub async fn save_installation(
         "installer_version": installer_version
     });
 
+    let supabase_url = get_supabase_url();
+    let supabase_key = get_supabase_key();
+
     let response = client
-        .post(format!("{}/rest/v1/installations", SUPABASE_URL))
-        .header("apikey", SUPABASE_ANON_KEY)
-        .header("Authorization", format!("Bearer {}", SUPABASE_ANON_KEY))
+        .post(format!("{}/rest/v1/installations", supabase_url))
+        .header("apikey", &supabase_key)
+        .header("Authorization", format!("Bearer {}", supabase_key))
         .header("Content-Type", "application/json")
         .header("Prefer", "return=representation")
         .json(&body)
@@ -53,6 +67,8 @@ pub async fn save_installation(
 /// Met à jour le statut d'une installation
 pub async fn update_status(installation_id: &str, status: &str, error: Option<&str>) -> Result<()> {
     let client = reqwest::Client::new();
+    let supabase_url = get_supabase_url();
+    let supabase_key = get_supabase_key();
 
     let mut body = json!({
         "status": status,
@@ -66,10 +82,10 @@ pub async fn update_status(installation_id: &str, status: &str, error: Option<&s
     client
         .patch(format!(
             "{}/rest/v1/installations?id=eq.{}",
-            SUPABASE_URL, installation_id
+            supabase_url, installation_id
         ))
-        .header("apikey", SUPABASE_ANON_KEY)
-        .header("Authorization", format!("Bearer {}", SUPABASE_ANON_KEY))
+        .header("apikey", &supabase_key)
+        .header("Authorization", format!("Bearer {}", supabase_key))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -87,6 +103,8 @@ pub async fn add_log(
     duration_ms: Option<i64>,
 ) -> Result<()> {
     let client = reqwest::Client::new();
+    let supabase_url = get_supabase_url();
+    let supabase_key = get_supabase_key();
 
     let body = json!({
         "installation_id": installation_id,
@@ -97,9 +115,9 @@ pub async fn add_log(
     });
 
     client
-        .post(format!("{}/rest/v1/installation_logs", SUPABASE_URL))
-        .header("apikey", SUPABASE_ANON_KEY)
-        .header("Authorization", format!("Bearer {}", SUPABASE_ANON_KEY))
+        .post(format!("{}/rest/v1/installation_logs", supabase_url))
+        .header("apikey", &supabase_key)
+        .header("Authorization", format!("Bearer {}", supabase_key))
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -111,14 +129,16 @@ pub async fn add_log(
 /// Vérifie si une installation existe déjà pour ce Pi
 pub async fn check_existing(pi_name: &str) -> Result<Option<String>> {
     let client = reqwest::Client::new();
+    let supabase_url = get_supabase_url();
+    let supabase_key = get_supabase_key();
 
     let response = client
         .get(format!(
             "{}/rest/v1/installations?pi_name=eq.{}&select=id,status",
-            SUPABASE_URL, pi_name
+            supabase_url, pi_name
         ))
-        .header("apikey", SUPABASE_ANON_KEY)
-        .header("Authorization", format!("Bearer {}", SUPABASE_ANON_KEY))
+        .header("apikey", &supabase_key)
+        .header("Authorization", format!("Bearer {}", supabase_key))
         .send()
         .await?;
 
