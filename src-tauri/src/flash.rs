@@ -4,11 +4,25 @@ use regex::Regex;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Window;
 use tokio::process::Command;
 
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
+
+// Protection contre les lancements multiples
+static FLASH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
+
+/// Guard RAII pour libérer le lock automatiquement
+struct FlashGuard;
+
+impl Drop for FlashGuard {
+    fn drop(&mut self) {
+        FLASH_IN_PROGRESS.store(false, Ordering::SeqCst);
+        println!("[FLASH] Lock released - flash complete or failed");
+    }
+}
 
 // URL de base pour lister les versions de Raspberry Pi OS
 const RPI_OS_INDEX_URL: &str = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/";
@@ -107,6 +121,16 @@ pub async fn flash_raspberry_pi_os(
     println!("[FLASH] SD Path: {}", config.sd_path);
     println!("[FLASH] Hostname: {}", config.hostname);
     println!("========================================");
+
+    // Protection contre les lancements multiples
+    if FLASH_IN_PROGRESS.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        println!("[FLASH] ERROR: Flash already in progress!");
+        return Err(anyhow!("Un flash est déjà en cours. Veuillez patienter."));
+    }
+    println!("[FLASH] Lock acquired - no other flash can start");
+
+    // Garantir qu'on libère le lock même en cas d'erreur
+    let _guard = FlashGuard;
 
     let cache_dir = dirs::cache_dir()
         .ok_or_else(|| anyhow!("Cannot find cache directory"))?

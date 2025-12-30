@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { Check, Loader2, HardDrive, AlertTriangle } from 'lucide-react';
@@ -34,7 +34,18 @@ export default function FlashProgress({ onComplete, onError }: FlashProgressProp
   const [currentMessage, setCurrentMessage] = useState('Préparation...');
   const [error, setError] = useState<string | null>(null);
 
+  // Protection contre les lancements multiples (React StrictMode, remount, etc.)
+  const hasStarted = useRef(false);
+
   useEffect(() => {
+    // Ne lancer qu'une seule fois, même si le composant est remonté
+    if (hasStarted.current) {
+      console.log('[FlashProgress] Already started, skipping...');
+      return;
+    }
+    hasStarted.current = true;
+    console.log('[FlashProgress] Starting flash (first time)');
+
     startFlashing();
     const unlisten = listen<ProgressEvent>('flash-progress', (event) => {
       const { step, percent, message } = event.payload;
