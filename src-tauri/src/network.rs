@@ -26,52 +26,62 @@ pub async fn discover_raspberry_pi(hostname: &str, timeout_secs: u64) -> Result<
 
 /// Découverte via mDNS (hostname.local)
 async fn discover_via_mdns(hostname: &str) -> Result<Option<PiInfo>> {
-    use mdns_sd::{ServiceDaemon, ServiceEvent};
+    println!("[Discovery] Searching for {}.local...", hostname);
 
-    let mdns = ServiceDaemon::new()?;
-
-    // Chercher le service SSH
-    let service_type = "_ssh._tcp.local.";
-    let receiver = mdns.browse(service_type)?;
-
-    let timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
-
-    while start.elapsed() < timeout {
-        match receiver.recv_timeout(Duration::from_secs(1)) {
-            Ok(ServiceEvent::ServiceResolved(info)) => {
-                if info.get_hostname().starts_with(hostname) {
-                    let ip = info
-                        .get_addresses()
-                        .iter()
-                        .find(|addr| addr.is_ipv4())
-                        .map(|addr| addr.to_string());
-
-                    if let Some(ip) = ip {
-                        return Ok(Some(PiInfo {
-                            ip,
-                            hostname: hostname.to_string(),
-                            mac_address: None,
-                        }));
-                    }
-                }
-            }
-            Ok(_) => {}
-            Err(_) => break,
-        }
-    }
-
-    // Essayer aussi la résolution DNS directe
+    // Méthode 1: Résolution DNS directe via .local (plus fiable)
     let full_hostname = format!("{}.local", hostname);
     if let Ok(addrs) = tokio::net::lookup_host(format!("{}:22", full_hostname)).await {
         for addr in addrs {
             if let IpAddr::V4(ipv4) = addr.ip() {
-                if is_ssh_available(&ipv4.to_string()).await {
+                let ip_str = ipv4.to_string();
+                println!("[Discovery] Resolved {} to {}", full_hostname, ip_str);
+                if is_ssh_available(&ip_str).await {
+                    println!("[Discovery] SSH available on {}", ip_str);
                     return Ok(Some(PiInfo {
-                        ip: ipv4.to_string(),
+                        ip: ip_str,
                         hostname: hostname.to_string(),
                         mac_address: None,
                     }));
+                } else {
+                    println!("[Discovery] SSH not available on {}", ip_str);
+                }
+            }
+        }
+    } else {
+        println!("[Discovery] Could not resolve {}", full_hostname);
+    }
+
+    // Méthode 2: mDNS service discovery (backup)
+    use mdns_sd::{ServiceDaemon, ServiceEvent};
+
+    if let Ok(mdns) = ServiceDaemon::new() {
+        let service_type = "_ssh._tcp.local.";
+        if let Ok(receiver) = mdns.browse(service_type) {
+            let timeout = Duration::from_secs(5);
+            let start = std::time::Instant::now();
+
+            while start.elapsed() < timeout {
+                match receiver.recv_timeout(Duration::from_secs(1)) {
+                    Ok(ServiceEvent::ServiceResolved(info)) => {
+                        println!("[Discovery] mDNS found: {}", info.get_hostname());
+                        if info.get_hostname().starts_with(hostname) {
+                            let ip = info
+                                .get_addresses()
+                                .iter()
+                                .find(|addr| addr.is_ipv4())
+                                .map(|addr| addr.to_string());
+
+                            if let Some(ip) = ip {
+                                return Ok(Some(PiInfo {
+                                    ip,
+                                    hostname: hostname.to_string(),
+                                    mac_address: None,
+                                }));
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
                 }
             }
         }
