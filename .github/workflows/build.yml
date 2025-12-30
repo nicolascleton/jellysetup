@@ -32,7 +32,7 @@ jobs:
           rustup target add x86_64-apple-darwin
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Create .env file
         run: |
@@ -74,7 +74,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Create .env file
         run: |
