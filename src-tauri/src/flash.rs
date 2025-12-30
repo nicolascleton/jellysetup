@@ -333,13 +333,33 @@ async fn download_image(window: &Window, url: &str, dest: &Path) -> Result<()> {
 }
 
 /// Extrait un fichier .xz
-async fn extract_xz(src: &Path, dest: &Path) -> Result<()> {
+async fn extract_xz(src: &Path, _dest: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        Command::new("xz")
+        // Essayer plusieurs chemins pour xz (Homebrew ARM, Homebrew Intel, système)
+        let xz_paths = ["/opt/homebrew/bin/xz", "/usr/local/bin/xz", "/usr/bin/xz", "xz"];
+        let mut xz_cmd = None;
+
+        for path in &xz_paths {
+            if std::path::Path::new(path).exists() || *path == "xz" {
+                xz_cmd = Some(*path);
+                break;
+            }
+        }
+
+        let xz_path = xz_cmd.ok_or_else(|| anyhow!("xz not found. Install with: brew install xz"))?;
+        println!("[Extract] Using xz at: {}", xz_path);
+
+        let output = Command::new(xz_path)
             .args(["-dk", src.to_str().unwrap()])
             .output()
             .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("[Extract] xz stderr: {}", stderr);
+            return Err(anyhow!("xz extraction failed: {}", stderr));
+        }
     }
 
     #[cfg(target_os = "windows")]
