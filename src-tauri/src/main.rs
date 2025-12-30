@@ -154,12 +154,18 @@ async fn flash_sd_card(
 /// Découvre le Raspberry Pi sur le réseau
 #[tauri::command]
 async fn discover_pi(hostname: String, timeout_secs: u64) -> Result<Option<PiInfo>, String> {
-    network::discover_raspberry_pi(&hostname, timeout_secs)
+    println!("[CMD discover_pi] Called with hostname={}, timeout={}s", hostname, timeout_secs);
+    let result = network::discover_raspberry_pi(&hostname, timeout_secs)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| {
+            println!("[CMD discover_pi] Error: {}", e);
+            e.to_string()
+        });
+    println!("[CMD discover_pi] Result: {:?}", result);
+    result
 }
 
-/// Vérifie la connexion SSH au Pi
+/// Vérifie la connexion SSH au Pi (clé privée)
 #[tauri::command]
 async fn test_ssh_connection(
     host: String,
@@ -167,6 +173,18 @@ async fn test_ssh_connection(
     private_key: String,
 ) -> Result<bool, String> {
     ssh::test_connection(&host, &username, &private_key)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Vérifie la connexion SSH au Pi (mot de passe)
+#[tauri::command]
+async fn test_ssh_connection_password(
+    host: String,
+    username: String,
+    password: String,
+) -> Result<bool, String> {
+    ssh::test_connection_password(&host, &username, &password)
         .await
         .map_err(|e| e.to_string())
 }
@@ -184,7 +202,7 @@ async fn ssh_exec(
         .map_err(|e| e.to_string())
 }
 
-/// Exécute une série de commandes d'installation
+/// Exécute une série de commandes d'installation (clé SSH)
 #[tauri::command]
 async fn run_installation(
     window: Window,
@@ -195,6 +213,20 @@ async fn run_installation(
     hostname: String,
 ) -> Result<(), String> {
     flash::run_full_installation(window, &host, &username, &private_key, config, &hostname)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Exécute une série de commandes d'installation (mot de passe)
+#[tauri::command]
+async fn run_installation_password(
+    window: Window,
+    host: String,
+    username: String,
+    password: String,
+    config: InstallConfig,
+) -> Result<(), String> {
+    flash::run_full_installation_password(window, &host, &username, &password, config)
         .await
         .map_err(|e| e.to_string())
 }
@@ -282,8 +314,10 @@ fn main() {
             flash_sd_card,
             discover_pi,
             test_ssh_connection,
+            test_ssh_connection_password,
             ssh_exec,
             run_installation,
+            run_installation_password,
             save_to_supabase,
             fetch_procedure,
             check_for_updates,

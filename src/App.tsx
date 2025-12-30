@@ -3,8 +3,10 @@ import { invoke } from '@tauri-apps/api/tauri';
 import { Check, Sparkles } from 'lucide-react';
 
 import PermissionCheck from './components/Wizard/PermissionCheck';
+import MainMenu from './components/Wizard/MainMenu';
 import Welcome from './components/Wizard/Welcome';
 import ConfigForm from './components/Wizard/ConfigForm';
+import QuickConnect from './components/Wizard/QuickConnect';
 import SDSelection from './components/Wizard/SDSelection';
 import FlashProgress from './components/Wizard/FlashProgress';
 import WaitingPi from './components/Wizard/WaitingPi';
@@ -15,28 +17,40 @@ import { useStore } from './lib/store';
 
 type WizardStep =
   | 'permission'
+  | 'menu'
   | 'welcome'
   | 'config'
+  | 'quick-connect'
   | 'sd-selection'
   | 'flash'
   | 'waiting'
   | 'configure'
   | 'complete';
 
-// Étapes affichées dans le stepper (sans permission qui est une étape cachée)
-const VISIBLE_STEPS = [
-  { id: 'welcome', label: 'Accueil', shortLabel: '1' },
-  { id: 'sd-selection', label: 'Carte SD', shortLabel: '2' },
-  { id: 'config', label: 'Configuration', shortLabel: '3' },
-  { id: 'flash', label: 'Installation', shortLabel: '4' },
-  { id: 'waiting', label: 'Connexion', shortLabel: '5' },
-  { id: 'configure', label: 'Setup', shortLabel: '6' },
-  { id: 'complete', label: 'Terminé', shortLabel: '7' },
+type FlowMode = 'full' | 'connect' | 'reconfigure';
+
+// Étapes pour le flow complet (flash + install)
+const FULL_STEPS = [
+  { id: 'sd-selection', label: 'Carte SD', shortLabel: '1' },
+  { id: 'config', label: 'Configuration', shortLabel: '2' },
+  { id: 'flash', label: 'Flash', shortLabel: '3' },
+  { id: 'waiting', label: 'Connexion', shortLabel: '4' },
+  { id: 'configure', label: 'Setup', shortLabel: '5' },
+  { id: 'complete', label: 'Terminé', shortLabel: '6' },
+];
+
+// Étapes pour le flow connexion rapide
+const CONNECT_STEPS = [
+  { id: 'quick-connect', label: 'Configuration', shortLabel: '1' },
+  { id: 'waiting', label: 'Connexion', shortLabel: '2' },
+  { id: 'configure', label: 'Setup', shortLabel: '3' },
+  { id: 'complete', label: 'Terminé', shortLabel: '4' },
 ];
 
 
 function App() {
   const [step, setStep] = useState<WizardStep>('permission');
+  const [flowMode, setFlowMode] = useState<FlowMode>('full');
   const { config, setConfig, piInfo, setPiInfo } = useStore();
 
   useEffect(() => {
@@ -54,24 +68,51 @@ function App() {
     }
   };
 
-  // Pour l'affichage, on utilise VISIBLE_STEPS (exclut permission)
-  const visibleStepIndex = VISIBLE_STEPS.findIndex((s) => s.id === step);
-  // Si on est sur permission, on affiche comme si on était avant la première étape
-  const currentStepIndex = step === 'permission' ? -1 : visibleStepIndex;
+  // Sélectionner les étapes en fonction du mode
+  const currentSteps = flowMode === 'connect' ? CONNECT_STEPS : FULL_STEPS;
+  const visibleStepIndex = currentSteps.findIndex((s) => s.id === step);
+  // Si on est sur permission ou menu, pas d'affichage du stepper
+  const currentStepIndex = ['permission', 'menu', 'welcome'].includes(step) ? -1 : visibleStepIndex;
+  const showStepper = !['permission', 'menu', 'welcome'].includes(step);
+
+  // Vérifier si on a une config existante (pour le message dans le menu)
+  const hasExistingConfig = Boolean(config.hostname && config.hostname !== 'jellypi');
 
   const renderStep = () => {
     switch (step) {
       case 'permission':
-        return <PermissionCheck onGranted={() => setStep('welcome')} />;
+        return <PermissionCheck onGranted={() => setStep('menu')} />;
+
+      case 'menu':
+        return (
+          <MainMenu
+            hasExistingConfig={hasExistingConfig}
+            onNewSetup={() => {
+              setFlowMode('full');
+              setStep('welcome');
+            }}
+            onConnectExisting={() => {
+              setFlowMode('connect');
+              setStep('quick-connect');
+            }}
+            onReconfigure={() => {
+              setFlowMode('connect');
+              setStep('quick-connect');
+            }}
+          />
+        );
+
       case 'welcome':
         return <Welcome onNext={() => setStep('sd-selection')} />;
+
       case 'sd-selection':
         return (
           <SDSelection
             onNext={() => setStep('config')}
-            onBack={() => setStep('welcome')}
+            onBack={() => setStep('menu')}
           />
         );
+
       case 'config':
         return (
           <ConfigForm
@@ -81,6 +122,17 @@ function App() {
             onBack={() => setStep('sd-selection')}
           />
         );
+
+      case 'quick-connect':
+        return (
+          <QuickConnect
+            config={config}
+            onConfigChange={setConfig}
+            onNext={() => setStep('waiting')}
+            onBack={() => setStep('menu')}
+          />
+        );
+
       case 'flash':
         return (
           <FlashProgress
@@ -88,6 +140,7 @@ function App() {
             onError={() => setStep('sd-selection')}
           />
         );
+
       case 'waiting':
         return (
           <WaitingPi
@@ -95,9 +148,10 @@ function App() {
               setPiInfo(info);
               setStep('configure');
             }}
-            onBack={() => setStep('sd-selection')}
+            onBack={() => flowMode === 'connect' ? setStep('quick-connect') : setStep('sd-selection')}
           />
         );
+
       case 'configure':
         return (
           <ConfigProgress
@@ -106,6 +160,7 @@ function App() {
             onError={() => setStep('waiting')}
           />
         );
+
       case 'complete':
         return (
           <Complete
@@ -120,12 +175,13 @@ function App() {
                 jellyfinPassword: '',
               });
               setPiInfo(null);
-              setStep('welcome');
+              setStep('menu');
             }}
           />
         );
+
       default:
-        return <Welcome onNext={() => setStep('config')} />;
+        return <MainMenu hasExistingConfig={false} onNewSetup={() => setStep('welcome')} onConnectExisting={() => setStep('quick-connect')} onReconfigure={() => setStep('quick-connect')} />;
     }
   };
 
@@ -155,10 +211,10 @@ function App() {
           </div>
         </div>
 
-        {/* Step indicator - Modern horizontal stepper (caché pendant permission) */}
-        {step !== 'permission' && (
+        {/* Step indicator - Modern horizontal stepper */}
+        {showStepper && (
           <div className="hidden md:flex items-center gap-1 bg-zinc-900/50 backdrop-blur-xl rounded-full px-2 py-2 border border-zinc-800">
-            {VISIBLE_STEPS.map((s, i) => {
+            {currentSteps.map((s, i) => {
               const isComplete = currentStepIndex > i;
               const isActive = step === s.id;
               const isPending = currentStepIndex < i;
@@ -176,7 +232,7 @@ function App() {
                   >
                     {isComplete ? <Check className="w-4 h-4" /> : i + 1}
                   </div>
-                  {i < VISIBLE_STEPS.length - 1 && (
+                  {i < currentSteps.length - 1 && (
                     <div
                       className={`w-4 h-0.5 mx-0.5 rounded transition-all duration-500 ${
                         isComplete ? 'bg-green-500' : 'bg-zinc-700'
@@ -189,23 +245,23 @@ function App() {
           </div>
         )}
 
-        {/* Mobile step indicator (caché pendant permission) */}
-        {step !== 'permission' && (
+        {/* Mobile step indicator */}
+        {showStepper && (
           <div className="md:hidden flex items-center gap-2 bg-zinc-900/50 backdrop-blur-xl rounded-full px-4 py-2 border border-zinc-800">
             <span className="text-sm font-medium text-white">
               {currentStepIndex + 1}
             </span>
             <span className="text-sm text-zinc-500">/</span>
-            <span className="text-sm text-zinc-500">{VISIBLE_STEPS.length}</span>
+            <span className="text-sm text-zinc-500">{currentSteps.length}</span>
           </div>
         )}
       </header>
 
-      {/* Step label (caché pendant permission) */}
-      {step !== 'permission' && (
+      {/* Step label */}
+      {showStepper && currentStepIndex >= 0 && (
         <div className="relative z-10 text-center py-2">
           <span className="text-sm text-zinc-500">
-            Étape {currentStepIndex + 1}: {VISIBLE_STEPS[currentStepIndex]?.label}
+            Étape {currentStepIndex + 1}: {currentSteps[currentStepIndex]?.label}
           </span>
         </div>
       )}

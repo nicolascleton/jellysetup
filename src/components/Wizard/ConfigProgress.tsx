@@ -27,29 +27,60 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
       setCurrentStep(0);
       addLog(`Connexion à ${piInfo.ip}...`);
 
-      const sshOk = await invoke<boolean>('test_ssh_connection', {
-        host: piInfo.ip,
-        username: 'maison',
-        privateKey: sshCredentials!.privateKey,
-      });
-      if (!sshOk) throw new Error('Connexion SSH impossible');
+      // Utiliser mot de passe si pas de clés SSH (flow QuickConnect)
+      const usePassword = !sshCredentials;
+      const username = config.systemUsername || 'maison';
+
+      if (usePassword) {
+        addLog(`Authentification par mot de passe pour ${username}@${piInfo.ip}`);
+        const sshOk = await invoke<boolean>('test_ssh_connection_password', {
+          host: piInfo.ip,
+          username: username,
+          password: config.systemPassword,
+        });
+        if (!sshOk) throw new Error('Connexion SSH impossible - vérifiez le mot de passe');
+      } else {
+        const sshOk = await invoke<boolean>('test_ssh_connection', {
+          host: piInfo.ip,
+          username: username,
+          privateKey: sshCredentials.privateKey,
+        });
+        if (!sshOk) throw new Error('Connexion SSH impossible');
+      }
 
       setCurrentStep(1);
       setProgress(12);
 
-      await invoke('run_installation', {
-        host: piInfo.ip,
-        username: 'maison',
-        privateKey: sshCredentials!.privateKey,
-        config: {
-          alldebrid_api_key: config.alldebridKey,
-          jellyfin_username: config.jellyfinUsername,
-          jellyfin_password: config.jellyfinPassword,
-          ygg_passkey: config.yggPasskey || null,
-          discord_webhook: config.discordWebhook || null,
-          cloudflare_token: config.cloudflareToken || null,
-        },
-      });
+      // Installation avec mot de passe ou clé
+      if (usePassword) {
+        await invoke('run_installation_password', {
+          host: piInfo.ip,
+          username: username,
+          password: config.systemPassword,
+          config: {
+            alldebrid_api_key: config.alldebridKey,
+            jellyfin_username: config.jellyfinUsername,
+            jellyfin_password: config.jellyfinPassword,
+            ygg_passkey: config.yggPasskey || null,
+            discord_webhook: config.discordWebhook || null,
+            cloudflare_token: config.cloudflareToken || null,
+          },
+        });
+      } else {
+        await invoke('run_installation', {
+          host: piInfo.ip,
+          username: username,
+          privateKey: sshCredentials.privateKey,
+          config: {
+            alldebrid_api_key: config.alldebridKey,
+            jellyfin_username: config.jellyfinUsername,
+            jellyfin_password: config.jellyfinPassword,
+            ygg_passkey: config.yggPasskey || null,
+            discord_webhook: config.discordWebhook || null,
+            cloudflare_token: config.cloudflareToken || null,
+          },
+        });
+      }
 
       for (let i = 2; i < steps.length; i++) {
         setCurrentStep(i);
@@ -60,8 +91,8 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
       const installId = await invoke<string>('save_to_supabase', {
         piName: piInfo.hostname,
         piIp: piInfo.ip,
-        sshPublicKey: sshCredentials!.publicKey,
-        sshPrivateKeyEncrypted: sshCredentials!.privateKey,
+        sshPublicKey: sshCredentials?.publicKey || '',
+        sshPrivateKeyEncrypted: sshCredentials?.privateKey || '',
         installerVersion: '1.0.0',
       });
       setInstallationId(installId);

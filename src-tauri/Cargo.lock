@@ -2237,6 +2237,7 @@ dependencies = [
  "indicatif",
  "libc",
  "mdns-sd",
+ "once_cell",
  "rand 0.8.5",
  "regex",
  "reqwest",

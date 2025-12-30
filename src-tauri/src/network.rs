@@ -1,5 +1,5 @@
 use crate::PiInfo;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
@@ -28,27 +28,94 @@ pub async fn discover_raspberry_pi(hostname: &str, timeout_secs: u64) -> Result<
 async fn discover_via_mdns(hostname: &str) -> Result<Option<PiInfo>> {
     println!("[Discovery] Searching for {}.local...", hostname);
 
-    // Méthode 1: Résolution DNS directe via .local (plus fiable)
-    let full_hostname = format!("{}.local", hostname);
-    if let Ok(addrs) = tokio::net::lookup_host(format!("{}:22", full_hostname)).await {
-        for addr in addrs {
-            if let IpAddr::V4(ipv4) = addr.ip() {
-                let ip_str = ipv4.to_string();
-                println!("[Discovery] Resolved {} to {}", full_hostname, ip_str);
-                if is_ssh_available(&ip_str).await {
-                    println!("[Discovery] SSH available on {}", ip_str);
-                    return Ok(Some(PiInfo {
-                        ip: ip_str,
-                        hostname: hostname.to_string(),
-                        mac_address: None,
-                    }));
-                } else {
-                    println!("[Discovery] SSH not available on {}", ip_str);
+    // Méthode 1: Utiliser ping + dscacheutil sur macOS
+    #[cfg(target_os = "macos")]
+    {
+        use tokio::process::Command;
+        let full_hostname = format!("{}.local", hostname);
+
+        // D'abord ping pour peupler le cache DNS (mDNS)
+        println!("[Discovery] Ping {} to populate DNS cache...", full_hostname);
+        let ping_result = Command::new("ping")
+            .args(["-c", "1", "-W", "2", &full_hostname])
+            .output()
+            .await;
+
+        if let Ok(output) = ping_result {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("[Discovery] Ping output: {}", stdout.lines().next().unwrap_or(""));
+
+            // Extraire l'IP directement du ping si possible
+            // Format: "PING jellypi.local (192.168.1.106): 56 data bytes"
+            if let Some(line) = stdout.lines().next() {
+                if let Some(start) = line.find('(') {
+                    if let Some(end) = line.find(')') {
+                        let ip_str = &line[start + 1..end];
+                        println!("[Discovery] Extracted IP from ping: {}", ip_str);
+                        if is_ssh_available(ip_str).await {
+                            println!("[Discovery] SSH available on {}", ip_str);
+                            return Ok(Some(PiInfo {
+                                ip: ip_str.to_string(),
+                                hostname: hostname.to_string(),
+                                mac_address: None,
+                            }));
+                        }
+                    }
                 }
             }
         }
-    } else {
-        println!("[Discovery] Could not resolve {}", full_hostname);
+
+        // Fallback: dscacheutil (le cache devrait être peuplé maintenant)
+        println!("[Discovery] Fallback to dscacheutil for {}", full_hostname);
+        if let Ok(output) = Command::new("dscacheutil")
+            .args(["-q", "host", "-a", "name", &full_hostname])
+            .output()
+            .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("[Discovery] dscacheutil output: {}", stdout);
+
+            for line in stdout.lines() {
+                if line.starts_with("ip_address:") {
+                    let ip_str = line.trim_start_matches("ip_address:").trim();
+                    println!("[Discovery] Found IP: {}", ip_str);
+                    if is_ssh_available(ip_str).await {
+                        println!("[Discovery] SSH available on {}", ip_str);
+                        return Ok(Some(PiInfo {
+                            ip: ip_str.to_string(),
+                            hostname: hostname.to_string(),
+                            mac_address: None,
+                        }));
+                    } else {
+                        println!("[Discovery] SSH not available on {}", ip_str);
+                    }
+                }
+            }
+        } else {
+            println!("[Discovery] dscacheutil failed");
+        }
+    }
+
+    // Méthode 1bis: Résolution DNS standard (pour autres OS)
+    #[cfg(not(target_os = "macos"))]
+    {
+        let full_hostname = format!("{}.local", hostname);
+        if let Ok(addrs) = tokio::net::lookup_host(format!("{}:22", full_hostname)).await {
+            for addr in addrs {
+                if let IpAddr::V4(ipv4) = addr.ip() {
+                    let ip_str = ipv4.to_string();
+                    println!("[Discovery] Resolved {} to {}", full_hostname, ip_str);
+                    if is_ssh_available(&ip_str).await {
+                        println!("[Discovery] SSH available on {}", ip_str);
+                        return Ok(Some(PiInfo {
+                            ip: ip_str,
+                            hostname: hostname.to_string(),
+                            mac_address: None,
+                        }));
+                    }
+                }
+            }
+        }
     }
 
     // Méthode 2: mDNS service discovery (backup)
@@ -139,7 +206,7 @@ async fn is_ssh_available(ip: &str) -> bool {
 }
 
 /// Obtient le hostname via une commande SSH basique
-async fn get_hostname_via_ssh(ip: &str) -> Result<String> {
+async fn get_hostname_via_ssh(_ip: &str) -> Result<String> {
     // On ne peut pas vraiment faire ça sans les credentials
     // Cette fonction est placeholder
     Ok(String::new())

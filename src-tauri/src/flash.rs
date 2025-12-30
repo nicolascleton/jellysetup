@@ -1116,3 +1116,87 @@ fn emit_progress(window: &Window, step: &str, percent: u32, message: &str, speed
         },
     );
 }
+
+/// Exécute l'installation complète sur le Pi via SSH (authentification par mot de passe)
+pub async fn run_full_installation_password(
+    window: Window,
+    host: &str,
+    username: &str,
+    password: &str,
+    config: InstallConfig,
+) -> Result<()> {
+    use crate::ssh;
+
+    // Pour QuickConnect, on utilise le hostname du Pi tel quel
+    let hostname = host.replace(".local", "");
+
+    // Générer le docker-compose.yml avec tous les services
+    let docker_compose = generate_docker_compose(
+        &hostname,
+        config.cloudflare_token.as_deref()
+    );
+
+    // Étape 1: Mise à jour système
+    emit_progress(&window, "update", 0, "Mise à jour système...", None);
+    let update_cmd = format!(
+        "echo '{}' | sudo -S apt update && echo '{}' | sudo -S apt upgrade -y && echo '{}' | sudo -S apt install -y git curl",
+        password, password, password
+    );
+    ssh::execute_command_password(host, username, password, &update_cmd).await?;
+
+    // Étape 2: Installation Docker
+    emit_progress(&window, "docker", 15, "Installation Docker...", None);
+    let docker_cmd = format!(
+        "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && echo '{}' | sudo -S sh /tmp/get-docker.sh && echo '{}' | sudo -S usermod -aG docker $USER",
+        password, password
+    );
+    ssh::execute_command_password(host, username, password, &docker_cmd).await?;
+
+    // Étape 3: Redémarrage pour appliquer groupe docker
+    emit_progress(&window, "reboot", 30, "Redémarrage...", None);
+    let reboot_cmd = format!("echo '{}' | sudo -S reboot", password);
+    ssh::execute_command_password(host, username, password, &reboot_cmd).await.ok();
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+    // Attendre que le Pi soit de nouveau accessible
+    for i in 0..30 {
+        if ssh::execute_command_password(host, username, password, "echo ok").await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        if i == 29 {
+            return Err(anyhow!("Pi not responding after reboot"));
+        }
+    }
+
+    // Étape 4: Création de la structure
+    emit_progress(&window, "structure", 40, "Création structure...", None);
+    let mkdir_cmd = format!(
+        "mkdir -p ~/media-stack/{{decypharr,jellyfin,radarr,sonarr,prowlarr,jellyseerr,bazarr,logs}} && echo '{}' | sudo -S mkdir -p /mnt/decypharr && echo '{}' | sudo -S chown $USER:$USER /mnt/decypharr",
+        password, password
+    );
+    ssh::execute_command_password(host, username, password, &mkdir_cmd).await?;
+
+    // Étape 5: Écrire le docker-compose.yml
+    emit_progress(&window, "compose_write", 50, "Génération docker-compose.yml...", None);
+    let write_cmd = format!("cat > ~/media-stack/docker-compose.yml << 'EOFCOMPOSE'\n{}\nEOFCOMPOSE", docker_compose);
+    ssh::execute_command_password(host, username, password, &write_cmd).await?;
+
+    // Étape 6: Démarrer les services
+    emit_progress(&window, "compose_up", 60, "Démarrage des services Docker...", None);
+    ssh::execute_command_password(host, username, password,
+        "cd ~/media-stack && docker compose pull && docker compose up -d"
+    ).await?;
+
+    // Étape 7: Attendre que les services soient prêts
+    emit_progress(&window, "wait_services", 75, "Attente des services...", None);
+    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+    // Étape 8: Configuration des services via API
+    emit_progress(&window, "config", 85, "Configuration des services...", None);
+
+    emit_progress(&window, "complete", 100, "Installation terminée !", None);
+
+    tracing::info!("Installation (password auth) completed successfully on {}", host);
+    Ok(())
+}

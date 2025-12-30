@@ -133,7 +133,7 @@ export const useStore = create<Store>()(
       clearLogs: () => set({ logs: [] }),
     }),
     {
-      name: 'jellysetup-storage',
+      name: 'jellysetup-storage-v4',
       partialize: (state) => ({
         // Ne persister que les données importantes
         config: state.config,

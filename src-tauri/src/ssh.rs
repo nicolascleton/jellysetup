@@ -19,7 +19,7 @@ impl client::Handler for Client {
     }
 }
 
-/// Teste la connexion SSH
+/// Teste la connexion SSH avec clé privée
 pub async fn test_connection(host: &str, username: &str, private_key: &str) -> Result<bool> {
     let config = client::Config::default();
     let config = Arc::new(config);
@@ -37,7 +37,40 @@ pub async fn test_connection(host: &str, username: &str, private_key: &str) -> R
     Ok(auth_result)
 }
 
-/// Exécute une commande SSH et retourne la sortie
+/// Teste la connexion SSH avec mot de passe
+pub async fn test_connection_password(host: &str, username: &str, password: &str) -> Result<bool> {
+    println!("[SSH] Connecting to {}@{}...", username, host);
+
+    let config = client::Config::default();
+    let config = Arc::new(config);
+
+    let mut session = match client::connect(config, (host, 22), Client {}).await {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[SSH] Connection failed: {}", e);
+            return Err(anyhow!("Connection failed: {}", e));
+        }
+    };
+
+    println!("[SSH] Authenticating with password...");
+    let auth_result = match session.authenticate_password(username, password).await {
+        Ok(r) => r,
+        Err(e) => {
+            println!("[SSH] Password auth failed: {}", e);
+            return Err(anyhow!("Password auth failed: {}", e));
+        }
+    };
+
+    println!("[SSH] Auth result: {}", auth_result);
+
+    if let Err(e) = session.disconnect(Disconnect::ByApplication, "", "").await {
+        println!("[SSH] Disconnect warning: {}", e);
+    }
+
+    Ok(auth_result)
+}
+
+/// Exécute une commande SSH et retourne la sortie (clé privée)
 pub async fn execute_command(
     host: &str,
     username: &str,
@@ -59,6 +92,56 @@ pub async fn execute_command(
         return Err(anyhow!("Authentication failed"));
     }
 
+    execute_on_session(&mut session, command).await
+}
+
+/// Exécute une commande SSH et retourne la sortie (mot de passe)
+pub async fn execute_command_password(
+    host: &str,
+    username: &str,
+    password: &str,
+    command: &str,
+) -> Result<String> {
+    println!("[SSH] exec_password: connecting to {}@{}", username, host);
+    println!("[SSH] Command: {}", &command[..command.len().min(100)]);
+
+    let config = client::Config::default();
+    let config = Arc::new(config);
+
+    let mut session = match client::connect(config, (host, 22), Client {}).await {
+        Ok(s) => {
+            println!("[SSH] exec_password: connected");
+            s
+        }
+        Err(e) => {
+            println!("[SSH] exec_password: connection failed: {}", e);
+            return Err(anyhow!("Connection failed: {}", e));
+        }
+    };
+
+    println!("[SSH] exec_password: authenticating...");
+    let auth_result = match session.authenticate_password(username, password).await {
+        Ok(r) => r,
+        Err(e) => {
+            println!("[SSH] exec_password: auth failed: {}", e);
+            return Err(anyhow!("Password auth failed: {}", e));
+        }
+    };
+
+    if !auth_result {
+        println!("[SSH] exec_password: auth returned false");
+        return Err(anyhow!("Password authentication failed"));
+    }
+
+    println!("[SSH] exec_password: executing command...");
+    execute_on_session(&mut session, command).await
+}
+
+/// Fonction interne pour exécuter une commande sur une session
+async fn execute_on_session(
+    session: &mut client::Handle<Client>,
+    command: &str,
+) -> Result<String> {
     let mut channel = session.channel_open_session().await?;
 
     channel.exec(true, command).await?;
