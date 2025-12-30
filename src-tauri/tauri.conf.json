@@ -45,11 +45,11 @@
       "identifier": "com.jellysetup.app",
       "longDescription": "Application de configuration automatique pour Raspberry Pi Media Center avec Jellyfin, Radarr, Sonarr et plus.",
       "macOS": {
-        "entitlements": null,
+        "entitlements": "entitlements.plist",
         "exceptionDomain": "",
         "frameworks": [],
         "providerShortName": null,
-        "signingIdentity": null
+        "signingIdentity": "-"
       },
       "resources": [],
       "shortDescription": "Setup Raspberry Pi Media Center",

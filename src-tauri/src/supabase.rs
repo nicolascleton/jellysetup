@@ -16,6 +16,18 @@ fn get_supabase_key() -> String {
         .to_string()
 }
 
+/// Get service key for Supabazarr (allows write access)
+pub fn get_supabase_service_key() -> String {
+    option_env!("SUPABASE_SERVICE_KEY")
+        .unwrap_or("your-service-key")
+        .to_string()
+}
+
+/// Get Supabase URL for external use
+pub fn get_supabase_url_public() -> String {
+    get_supabase_url()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Installation {
     id: Option<String>,

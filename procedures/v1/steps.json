@@ -75,7 +75,7 @@
       "type": "template",
       "template": "docker-compose.yml.j2",
       "output": "~/media-stack/docker-compose.yml",
-      "variables": ["pi_name", "pi_ip", "cloudflare_token"],
+      "variables": ["pi_name", "pi_ip", "cloudflare_token", "supabase_url", "supabase_service_key"],
       "critical": true
     },
     {

@@ -158,6 +158,35 @@ services:
       - TZ=Europe/Paris
       - LOG_LEVEL=info
 
+  # ===========================================================================
+  # Supabazarr - Backup service to Supabase
+  # ===========================================================================
+  supabazarr:
+    image: ghcr.io/nicolascleton/supabazarr:latest
+    container_name: supabazarr
+    restart: unless-stopped
+    environment:
+      - TZ=Europe/Paris
+      - PUID=1000
+      - PGID=1000
+      - SUPABASE_URL={{ supabase_url }}
+      - SUPABASE_SERVICE_KEY={{ supabase_service_key }}
+      - HOSTNAME={{ pi_name }}
+      - MEDIA_STACK_PATH=/media-stack
+    volumes:
+      - ./:/media-stack:ro
+      - supabazarr_data:/etc/supabazarr
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 {% if cloudflare_token is defined and cloudflare_token != "" %}
   # ===========================================================================
   # Cloudflared - Cloudflare tunnel for remote access
@@ -170,6 +199,9 @@ services:
     environment:
       - TUNNEL_TOKEN={{ cloudflare_token }}
 {% endif %}
+
+volumes:
+  supabazarr_data:
 
 networks:
   default:

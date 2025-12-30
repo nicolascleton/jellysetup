@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Permet l'exécution de commandes avec privilèges élevés -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Accès aux périphériques USB -->
+    <key>com.apple.security.device.usb</key>
+    <true/>
+
+    <!-- Accès aux volumes amovibles -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Désactiver la sandbox pour accès complet au disque -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Héritage des privilèges pour les sous-processus -->
+    <key>com.apple.security.inherit</key>
+    <true/>
+
+    <!-- Permettre DYLD variables (nécessaire pour certaines opérations) -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!-- Désactiver la validation de bibliothèque -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use russh::*;
 use russh_keys::*;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 
 struct Client {}
 
@@ -12,8 +11,8 @@ impl client::Handler for Client {
 
     async fn check_server_key(
         self,
-        _server_public_key: &key::PublicKey,
-    ) -> Result<(Self, bool), Self::Error> {
+        _server_public_key: &russh_keys::key::PublicKey,
+    ) -> std::result::Result<(Self, bool), Self::Error> {
         // Accepter toutes les clés (première connexion)
         // En production, on devrait vérifier le fingerprint
         Ok((self, true))

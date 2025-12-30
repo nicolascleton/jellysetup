@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSRemovableVolumesUsageDescription</key>
+    <string>JellySetup a besoin d'accéder à votre carte SD pour installer Raspberry Pi OS.</string>
+
+    <key>NSSystemAdministrationUsageDescription</key>
+    <string>JellySetup a besoin des privilèges administrateur pour écrire l'image sur la carte SD.</string>
+</dict>
+</plist>

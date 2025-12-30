@@ -51,7 +51,8 @@ pub fn encrypt_private_key(private_key: &str, admin_password: &str) -> Result<St
     // Dériver la clé avec Argon2
     let argon2 = Argon2::default();
     let password_hash = argon2
-        .hash_password(admin_password.as_bytes(), &salt)?
+        .hash_password(admin_password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("Password hashing failed: {}", e))?
         .to_string();
 
     // Extraire le hash (les 32 premiers bytes)
@@ -90,14 +91,16 @@ pub fn decrypt_private_key(encrypted: &str, admin_password: &str) -> Result<Stri
 
     // Extraire les composants
     let salt_str = std::str::from_utf8(&combined[..22])?;
-    let salt = SaltString::from_b64(salt_str)?;
+    let salt = SaltString::from_b64(salt_str)
+        .map_err(|e| anyhow::anyhow!("Invalid salt: {}", e))?;
     let nonce_bytes: [u8; 12] = combined[22..34].try_into()?;
     let ciphertext = &combined[34..];
 
     // Dériver la clé avec le même sel
     let argon2 = Argon2::default();
     let password_hash = argon2
-        .hash_password(admin_password.as_bytes(), &salt)?
+        .hash_password(admin_password.as_bytes(), &salt)
+        .map_err(|e| anyhow::anyhow!("Password hashing failed: {}", e))?
         .to_string();
 
     let hash_bytes = password_hash.as_bytes();

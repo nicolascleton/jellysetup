@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
-import { ArrowLeft, ArrowRight, RefreshCw, AlertTriangle, HardDrive, Check } from 'lucide-react';
+import { ArrowLeft, ArrowRight, RefreshCw, HardDrive, Check } from 'lucide-react';
 import { useStore, SDCard } from '../../lib/store';
 
 interface SDSelectionProps {
@@ -32,151 +32,88 @@ export default function SDSelection({ onNext, onBack }: SDSelectionProps) {
 
   const formatSize = (bytes: number): string => {
     const gb = bytes / (1024 * 1024 * 1024);
-    return `${gb.toFixed(1)} GB`;
+    return `${gb.toFixed(0)} GB`;
   };
 
   const handleNext = () => {
-    if (selectedSD && confirmed) {
-      onNext();
-    }
+    if (selectedSD && confirmed) onNext();
   };
 
   return (
-    <div className="space-y-6">
-      <div className="text-center mb-8">
-        <h2 className="text-2xl font-bold text-white mb-2">
-          Sélection de la carte SD
-        </h2>
-        <p className="text-gray-400">
-          Choisissez la carte SD sur laquelle installer le système
-        </p>
-      </div>
-
-      {/* Warning */}
-      <div className="bg-orange-500/10 border border-orange-500/30 rounded-xl p-4 flex items-start gap-3">
-        <AlertTriangle className="w-6 h-6 text-orange-400 flex-shrink-0 mt-0.5" />
-        <div>
-          <h4 className="font-medium text-orange-400 mb-1">Attention</h4>
-          <p className="text-sm text-orange-300/80">
-            Toutes les données présentes sur la carte SD seront effacées.
-            Assurez-vous d'avoir sauvegardé vos données importantes.
-          </p>
-        </div>
-      </div>
-
+    <div className="space-y-4">
       {/* SD Cards List */}
-      <div className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-medium text-gray-400">
-            Cartes SD détectées
-          </h3>
-          <button
-            onClick={loadSDCards}
-            disabled={loading}
-            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm text-gray-400 hover:text-white transition-colors disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-            Actualiser
-          </button>
-        </div>
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-sm text-zinc-400">Cartes détectées</span>
+        <button onClick={loadSDCards} disabled={loading} className="btn-ghost text-xs py-1">
+          <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
+          Actualiser
+        </button>
+      </div>
 
+      <div className="space-y-2 max-h-[200px] overflow-auto">
         {loading ? (
-          <div className="bg-gray-800/50 rounded-xl p-8 text-center">
-            <RefreshCw className="w-8 h-8 text-gray-500 animate-spin mx-auto mb-3" />
-            <p className="text-gray-400">Recherche des cartes SD...</p>
+          <div className="card !p-8 text-center">
+            <RefreshCw className="w-6 h-6 text-zinc-600 animate-spin mx-auto mb-2" />
+            <p className="text-sm text-zinc-500">Recherche...</p>
           </div>
         ) : sdCards.length === 0 ? (
-          <div className="bg-gray-800/50 rounded-xl p-8 text-center">
-            <HardDrive className="w-12 h-12 text-gray-600 mx-auto mb-3" />
-            <p className="text-gray-400 mb-2">Aucune carte SD détectée</p>
-            <p className="text-sm text-gray-500">
-              Insérez une carte SD et cliquez sur "Actualiser"
-            </p>
+          <div className="card !p-8 text-center">
+            <HardDrive className="w-6 h-6 text-zinc-600 mx-auto mb-2" />
+            <p className="text-sm text-zinc-400">Aucune carte SD</p>
           </div>
         ) : (
-          <div className="space-y-2">
-            {sdCards.map((card) => (
+          sdCards.map((card) => {
+            const isSelected = selectedSD?.path === card.path;
+            return (
               <button
                 key={card.path}
-                onClick={() => {
-                  setSelectedSD(card);
-                  setConfirmed(false);
-                }}
-                className={`w-full p-4 rounded-xl border-2 transition-all text-left ${
-                  selectedSD?.path === card.path
+                onClick={() => { setSelectedSD(card); setConfirmed(false); }}
+                className={`w-full p-3 rounded-xl border-2 transition-all text-left ${
+                  isSelected
                     ? 'bg-purple-500/10 border-purple-500'
-                    : 'bg-gray-800/50 border-gray-700 hover:border-gray-600'
+                    : 'card border-transparent hover:border-zinc-700'
                 }`}
               >
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <div
-                      className={`w-10 h-10 rounded-lg flex items-center justify-center ${
-                        selectedSD?.path === card.path
-                          ? 'bg-purple-500/20'
-                          : 'bg-gray-700'
-                      }`}
-                    >
-                      <HardDrive
-                        className={`w-5 h-5 ${
-                          selectedSD?.path === card.path
-                            ? 'text-purple-400'
-                            : 'text-gray-400'
-                        }`}
-                      />
-                    </div>
+                    <HardDrive className={`w-5 h-5 ${isSelected ? 'text-purple-400' : 'text-zinc-400'}`} />
                     <div>
-                      <p className="font-medium text-white">{card.name}</p>
-                      <p className="text-sm text-gray-400">
-                        {card.path} • {formatSize(card.size)}
-                      </p>
+                      <p className="font-medium text-white text-sm">{card.name}</p>
+                      <p className="text-xs text-zinc-500">{formatSize(card.size)}</p>
                     </div>
                   </div>
-                  {selectedSD?.path === card.path && (
-                    <div className="w-6 h-6 bg-purple-500 rounded-full flex items-center justify-center">
-                      <Check className="w-4 h-4 text-white" />
-                    </div>
-                  )}
+                  {isSelected && <Check className="w-5 h-5 text-purple-400" />}
                 </div>
               </button>
-            ))}
-          </div>
+            );
+          })
         )}
       </div>
 
       {/* Confirmation */}
       {selectedSD && (
-        <label className="flex items-center gap-3 p-4 bg-gray-800/50 rounded-xl cursor-pointer">
+        <label className="flex items-center gap-3 p-3 card cursor-pointer text-sm">
           <input
             type="checkbox"
             checked={confirmed}
             onChange={(e) => setConfirmed(e.target.checked)}
-            className="w-5 h-5 rounded border-gray-600 bg-gray-700 text-purple-500 focus:ring-purple-500 focus:ring-offset-0"
+            className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-purple-500"
           />
-          <span className="text-sm text-gray-300">
-            Je confirme vouloir effacer <strong className="text-white">{selectedSD.name}</strong> et
-            installer Raspberry Pi OS dessus
+          <span className="text-zinc-300">
+            Effacer <span className="font-semibold text-white">{selectedSD.name}</span>
           </span>
         </label>
       )}
 
       {/* Navigation */}
-      <div className="flex justify-between pt-4">
-        <button
-          onClick={onBack}
-          className="inline-flex items-center gap-2 px-6 py-3 text-gray-400 hover:text-white transition-colors"
-        >
-          <ArrowLeft className="w-5 h-5" />
+      <div className="flex justify-between pt-2">
+        <button onClick={onBack} className="btn-ghost">
+          <ArrowLeft className="w-4 h-4" />
           Retour
         </button>
-
-        <button
-          onClick={handleNext}
-          disabled={!selectedSD || !confirmed}
-          className="inline-flex items-center gap-2 px-8 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 disabled:text-gray-500 text-white font-medium rounded-xl transition-colors"
-        >
-          Flasher la carte
-          <ArrowRight className="w-5 h-5" />
+        <button onClick={handleNext} disabled={!selectedSD || !confirmed} className="btn-primary">
+          Configurer
+          <ArrowRight className="w-4 h-4" />
         </button>
       </div>
     </div>

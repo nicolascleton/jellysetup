@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
-import { listen } from '@tauri-apps/api/event';
+import { Check, Sparkles } from 'lucide-react';
 
+import PermissionCheck from './components/Wizard/PermissionCheck';
 import Welcome from './components/Wizard/Welcome';
 import ConfigForm from './components/Wizard/ConfigForm';
 import SDSelection from './components/Wizard/SDSelection';
@@ -13,6 +14,7 @@ import Complete from './components/Wizard/Complete';
 import { useStore } from './lib/store';
 
 type WizardStep =
+  | 'permission'
   | 'welcome'
   | 'config'
   | 'sd-selection'
@@ -21,11 +23,22 @@ type WizardStep =
   | 'configure'
   | 'complete';
 
+// Étapes affichées dans le stepper (sans permission qui est une étape cachée)
+const VISIBLE_STEPS = [
+  { id: 'welcome', label: 'Accueil', shortLabel: '1' },
+  { id: 'sd-selection', label: 'Carte SD', shortLabel: '2' },
+  { id: 'config', label: 'Configuration', shortLabel: '3' },
+  { id: 'flash', label: 'Installation', shortLabel: '4' },
+  { id: 'waiting', label: 'Connexion', shortLabel: '5' },
+  { id: 'configure', label: 'Setup', shortLabel: '6' },
+  { id: 'complete', label: 'Terminé', shortLabel: '7' },
+];
+
+
 function App() {
-  const [step, setStep] = useState<WizardStep>('welcome');
+  const [step, setStep] = useState<WizardStep>('permission');
   const { config, setConfig, piInfo, setPiInfo } = useStore();
 
-  // Écouter les mises à jour de version
   useEffect(() => {
     checkForUpdates();
   }, []);
@@ -34,7 +47,6 @@ function App() {
     try {
       const latestVersion = await invoke<string | null>('check_for_updates');
       if (latestVersion && latestVersion !== '1.0.0') {
-        // Afficher notification de mise à jour
         console.log('Nouvelle version disponible:', latestVersion);
       }
     } catch (error) {
@@ -42,29 +54,33 @@ function App() {
     }
   };
 
+  // Pour l'affichage, on utilise VISIBLE_STEPS (exclut permission)
+  const visibleStepIndex = VISIBLE_STEPS.findIndex((s) => s.id === step);
+  // Si on est sur permission, on affiche comme si on était avant la première étape
+  const currentStepIndex = step === 'permission' ? -1 : visibleStepIndex;
+
   const renderStep = () => {
     switch (step) {
+      case 'permission':
+        return <PermissionCheck onGranted={() => setStep('welcome')} />;
       case 'welcome':
-        return <Welcome onNext={() => setStep('config')} />;
-
+        return <Welcome onNext={() => setStep('sd-selection')} />;
+      case 'sd-selection':
+        return (
+          <SDSelection
+            onNext={() => setStep('config')}
+            onBack={() => setStep('welcome')}
+          />
+        );
       case 'config':
         return (
           <ConfigForm
             config={config}
             onConfigChange={setConfig}
-            onNext={() => setStep('sd-selection')}
-            onBack={() => setStep('welcome')}
-          />
-        );
-
-      case 'sd-selection':
-        return (
-          <SDSelection
             onNext={() => setStep('flash')}
-            onBack={() => setStep('config')}
+            onBack={() => setStep('sd-selection')}
           />
         );
-
       case 'flash':
         return (
           <FlashProgress
@@ -72,7 +88,6 @@ function App() {
             onError={() => setStep('sd-selection')}
           />
         );
-
       case 'waiting':
         return (
           <WaitingPi
@@ -83,7 +98,6 @@ function App() {
             onBack={() => setStep('sd-selection')}
           />
         );
-
       case 'configure':
         return (
           <ConfigProgress
@@ -92,7 +106,6 @@ function App() {
             onError={() => setStep('waiting')}
           />
         );
-
       case 'complete':
         return (
           <Complete
@@ -111,54 +124,106 @@ function App() {
             }}
           />
         );
-
       default:
         return <Welcome onNext={() => setStep('config')} />;
     }
   };
 
   return (
-    <div className="min-h-screen bg-[#0f0f0f] flex flex-col">
+    <div className="min-h-screen flex flex-col bg-gradient-dark">
+      {/* Decorative background elements */}
+      <div className="fixed inset-0 overflow-hidden pointer-events-none">
+        <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500/20 rounded-full blur-3xl" />
+        <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-pink-500/20 rounded-full blur-3xl" />
+      </div>
+
       {/* Header */}
-      <header className="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-purple-600 rounded-xl flex items-center justify-center">
-            <span className="text-xl">🍓</span>
+      <header className="relative z-10 px-8 py-5 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <div className="w-12 h-12 bg-gradient-primary rounded-2xl flex items-center justify-center shadow-lg shadow-purple-500/30">
+              <span className="text-2xl">🍓</span>
+            </div>
+            <div className="absolute -top-1 -right-1 w-4 h-4 bg-green-500 rounded-full border-2 border-zinc-900" />
           </div>
           <div>
-            <h1 className="text-lg font-semibold text-white">JellySetup</h1>
-            <p className="text-xs text-gray-400">v1.0.0</p>
+            <h1 className="text-xl font-bold text-white flex items-center gap-2">
+              JellySetup
+              <Sparkles className="w-4 h-4 text-purple-400" />
+            </h1>
+            <p className="text-xs text-zinc-500">Configuration automatique</p>
           </div>
         </div>
 
-        {/* Step indicator */}
-        <div className="flex items-center gap-2">
-          {['welcome', 'config', 'sd-selection', 'flash', 'waiting', 'configure', 'complete'].map((s, i) => (
-            <div
-              key={s}
-              className={`w-2 h-2 rounded-full transition-colors ${
-                step === s
-                  ? 'bg-purple-500'
-                  : ['welcome', 'config', 'sd-selection', 'flash', 'waiting', 'configure', 'complete'].indexOf(step) > i
-                  ? 'bg-green-500'
-                  : 'bg-gray-700'
-              }`}
-            />
-          ))}
-        </div>
+        {/* Step indicator - Modern horizontal stepper (caché pendant permission) */}
+        {step !== 'permission' && (
+          <div className="hidden md:flex items-center gap-1 bg-zinc-900/50 backdrop-blur-xl rounded-full px-2 py-2 border border-zinc-800">
+            {VISIBLE_STEPS.map((s, i) => {
+              const isComplete = currentStepIndex > i;
+              const isActive = step === s.id;
+              const isPending = currentStepIndex < i;
+
+              return (
+                <div key={s.id} className="flex items-center">
+                  <div
+                    className={`
+                      w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium
+                      transition-all duration-300
+                      ${isActive ? 'bg-purple-500 text-white shadow-lg shadow-purple-500/50 scale-110' : ''}
+                      ${isComplete ? 'bg-green-500/20 text-green-400' : ''}
+                      ${isPending ? 'bg-zinc-800 text-zinc-500' : ''}
+                    `}
+                  >
+                    {isComplete ? <Check className="w-4 h-4" /> : i + 1}
+                  </div>
+                  {i < VISIBLE_STEPS.length - 1 && (
+                    <div
+                      className={`w-4 h-0.5 mx-0.5 rounded transition-all duration-500 ${
+                        isComplete ? 'bg-green-500' : 'bg-zinc-700'
+                      }`}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Mobile step indicator (caché pendant permission) */}
+        {step !== 'permission' && (
+          <div className="md:hidden flex items-center gap-2 bg-zinc-900/50 backdrop-blur-xl rounded-full px-4 py-2 border border-zinc-800">
+            <span className="text-sm font-medium text-white">
+              {currentStepIndex + 1}
+            </span>
+            <span className="text-sm text-zinc-500">/</span>
+            <span className="text-sm text-zinc-500">{VISIBLE_STEPS.length}</span>
+          </div>
+        )}
       </header>
 
+      {/* Step label (caché pendant permission) */}
+      {step !== 'permission' && (
+        <div className="relative z-10 text-center py-2">
+          <span className="text-sm text-zinc-500">
+            Étape {currentStepIndex + 1}: {VISIBLE_STEPS[currentStepIndex]?.label}
+          </span>
+        </div>
+      )}
+
       {/* Content */}
-      <main className="flex-1 flex items-center justify-center p-6">
-        <div className="w-full max-w-2xl">
+      <main className="relative z-10 flex-1 flex items-center justify-center px-6 py-4">
+        <div className="w-full max-w-2xl animate-fade-in-up">
           {renderStep()}
         </div>
       </main>
 
       {/* Footer */}
-      <footer className="px-6 py-3 border-t border-gray-800 text-center">
-        <p className="text-xs text-gray-500">
-          Besoin d'aide ? Contactez l'administrateur
+      <footer className="relative z-10 px-8 py-4 text-center border-t border-zinc-800/50">
+        <p className="text-xs text-zinc-600">
+          JellySetup v1.0.0 • Besoin d'aide ?{' '}
+          <a href="#" className="text-purple-400 hover:text-purple-300 transition-colors">
+            Contactez l'administrateur
+          </a>
         </p>
       </footer>
     </div>

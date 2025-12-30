@@ -24,12 +24,20 @@ pub struct SDCard {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FlashConfig {
     pub sd_path: String,
+    // Système
+    pub hostname: String,
+    pub system_username: String,
+    pub system_password: String,
+    // WiFi
     pub wifi_ssid: String,
     pub wifi_password: String,
-    pub hostname: String,
+    pub wifi_country: String,
+    // Locale
     pub timezone: String,
+    pub keymap: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +81,54 @@ async fn list_sd_cards() -> Result<Vec<SDCard>, String> {
     sd_card::list_removable_drives()
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Vérifie si l'app a accès aux disques (Full Disk Access sur macOS)
+#[tauri::command]
+fn check_disk_access() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Tester l'accès à un chemin protégé par TCC
+        let home = std::env::var("HOME").unwrap_or_default();
+        let test_path = format!("{}/Library/Safari", home);
+
+        if std::path::Path::new(&test_path).exists() {
+            match std::fs::read_dir(&test_path) {
+                Ok(_) => return Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
+                Err(_) => {} // Continuer avec d'autres tests
+            }
+        }
+
+        // Si Safari n'existe pas, essayer Mail
+        let mail_path = format!("{}/Library/Mail", home);
+        if std::path::Path::new(&mail_path).exists() {
+            match std::fs::read_dir(&mail_path) {
+                Ok(_) => return Ok(true),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(false),
+                Err(_) => {}
+            }
+        }
+
+        // Si on ne peut pas vérifier, assumer qu'on n'a pas l'accès
+        Ok(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(true)
+    }
+}
+
+/// Ouvre les réglages Full Disk Access (macOS)
+#[tauri::command]
+fn open_disk_access_settings() {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .args(["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"])
+            .spawn();
+    }
 }
 
 /// Génère une paire de clés SSH
@@ -136,8 +192,9 @@ async fn run_installation(
     username: String,
     private_key: String,
     config: InstallConfig,
+    hostname: String,
 ) -> Result<(), String> {
-    flash::run_full_installation(window, &host, &username, &private_key, config)
+    flash::run_full_installation(window, &host, &username, &private_key, config, &hostname)
         .await
         .map_err(|e| e.to_string())
 }
@@ -193,6 +250,24 @@ async fn check_for_updates() -> Result<Option<String>, String> {
     Ok(response.get("latest").and_then(|v| v.as_str()).map(String::from))
 }
 
+/// Redémarre l'application
+#[tauri::command]
+fn restart_app(app_handle: tauri::AppHandle) {
+    // En release, utiliser restart natif
+    #[cfg(not(debug_assertions))]
+    {
+        app_handle.restart();
+    }
+
+    // En dev mode, on quitte simplement - le hot reload de Vite s'occupe du reste
+    // ou l'utilisateur relance manuellement
+    #[cfg(debug_assertions)]
+    {
+        // Juste quitter, le localStorage garde le flag FDA
+        app_handle.exit(0);
+    }
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -212,6 +287,9 @@ fn main() {
             save_to_supabase,
             fetch_procedure,
             check_for_updates,
+            check_disk_access,
+            open_disk_access_settings,
+            restart_app,
         ])
         .setup(|app| {
             let window = app.get_window("main").unwrap();

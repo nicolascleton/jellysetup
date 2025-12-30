@@ -13,7 +13,7 @@ dotenv = "0.15"
 
 [dependencies]
 # Tauri
-tauri = { version = "1.5", features = ["shell-open", "dialog-all", "notification-all", "process-all"] }
+tauri = { version = "1.5", features = ["shell-open", "dialog-all", "notification-all", "process-all", "updater"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -26,6 +26,13 @@ russh-keys = "0.40"
 
 # HTTP client (pour télécharger l'image)
 reqwest = { version = "0.11", features = ["stream", "json"] }
+
+# Async utilities
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Directory utilities
+dirs = "5.0"
 
 # SD Card operations
 sysinfo = "0.30"
@@ -47,6 +54,9 @@ tracing-subscriber = "0.3"
 # Error handling
 thiserror = "1.0"
 anyhow = "1.0"
+
+# Regex pour parser les pages web
+regex = "1.10"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
