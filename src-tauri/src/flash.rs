@@ -540,13 +540,17 @@ async fn write_image_to_sd(_window: &Window, image: &Path, sd_path: &str) -> Res
                     let mut total_written: u64 = 0;
 
                     // Envoyer SIGINFO au process dd pour qu'il écrive sa progression
+                    // Chercher le process dd avec le chemin de l'image (bookworm ou raspios)
                     if let Ok(output) = std::process::Command::new("pgrep")
-                        .args(["-f", "dd if=.*raspios"])
+                        .args(["-f", "dd if=.*/jellysetup/.*\\.img"])
                         .output()
                     {
                         if let Ok(pid_str) = String::from_utf8(output.stdout) {
-                            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                                unsafe { libc::kill(pid, libc::SIGINFO); }
+                            for line in pid_str.lines() {
+                                if let Ok(pid) = line.trim().parse::<i32>() {
+                                    unsafe { libc::kill(pid, libc::SIGINFO); }
+                                    break; // On envoie qu'au premier process trouvé
+                                }
                             }
                         }
                     }
