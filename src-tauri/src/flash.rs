@@ -30,7 +30,8 @@ impl Drop for FlashGuard {
 // URL de base pour lister les versions de Raspberry Pi OS
 const RPI_OS_INDEX_URL: &str = "https://downloads.raspberrypi.com/raspios_lite_arm64/images/";
 
-/// Récupère l'URL de la dernière version de Raspberry Pi OS Lite 64-bit
+/// Récupère l'URL de la dernière version de Raspberry Pi OS Lite 64-bit (Bookworm)
+/// Note: On évite Trixie car custom.toml ne fonctionne pas (cloud-init requis)
 async fn get_latest_rpi_os_url() -> Result<(String, String)> {
     let client = reqwest::Client::new();
 
@@ -41,7 +42,7 @@ async fn get_latest_rpi_os_url() -> Result<(String, String)> {
         .text()
         .await?;
 
-    // Trouver la dernière version (format: raspios_lite_arm64-YYYY-MM-DD/)
+    // Trouver toutes les versions (format: raspios_lite_arm64-YYYY-MM-DD/)
     let re = Regex::new(r#"href="(raspios_lite_arm64-(\d{4}-\d{2}-\d{2})/)""#)?;
 
     let mut versions: Vec<(String, String)> = re.captures_iter(&index_html)
@@ -51,28 +52,54 @@ async fn get_latest_rpi_os_url() -> Result<(String, String)> {
     // Trier par date décroissante
     versions.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let latest_folder = versions.first()
-        .ok_or_else(|| anyhow!("Aucune version trouvée sur le serveur Raspberry Pi"))?;
+    // Chercher la dernière version BOOKWORM (pas Trixie)
+    // On vérifie le contenu de chaque dossier jusqu'à trouver une version bookworm
+    let mut latest_folder: Option<&(String, String)> = None;
+    let mut image_filename = String::new();
 
-    // Récupérer le contenu du dossier pour trouver le fichier .img.xz
+    for version in &versions {
+        let folder_url = format!("{}{}", RPI_OS_INDEX_URL, version.0);
+        if let Ok(resp) = client.get(&folder_url).send().await {
+            if let Ok(folder_html) = resp.text().await {
+                // Chercher un fichier bookworm (pas trixie)
+                if folder_html.contains("bookworm") && !folder_html.contains("trixie") {
+                    let file_re = Regex::new(r#"href="([^"]*bookworm[^"]*\.img\.xz)""#)?;
+                    if let Some(cap) = file_re.captures(&folder_html) {
+                        image_filename = cap[1].to_string();
+                        latest_folder = Some(version);
+                        println!("[Flash] Found Bookworm version: {}", version.0);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let latest_folder = latest_folder
+        .ok_or_else(|| anyhow!("Aucune version Bookworm trouvée sur le serveur Raspberry Pi"))?;
+
     let folder_url = format!("{}{}", RPI_OS_INDEX_URL, latest_folder.0);
-    let folder_html = client.get(&folder_url)
-        .send()
-        .await?
-        .text()
-        .await?;
 
-    // Trouver le fichier .img.xz
-    let file_re = Regex::new(r#"href="([^"]+\.img\.xz)""#)?;
-    let image_filename = file_re.captures(&folder_html)
-        .ok_or_else(|| anyhow!("Fichier image non trouvé"))?[1]
-        .to_string();
+    // Si on n'a pas encore le nom du fichier, le récupérer
+    let image_filename = if image_filename.is_empty() {
+        let folder_html = client.get(&folder_url)
+            .send()
+            .await?
+            .text()
+            .await?;
+        let file_re = Regex::new(r#"href="([^"]+\.img\.xz)""#)?;
+        file_re.captures(&folder_html)
+            .ok_or_else(|| anyhow!("Fichier image non trouvé"))?[1]
+            .to_string()
+    } else {
+        image_filename
+    };
 
     let full_url = format!("{}{}", folder_url, image_filename);
     let extracted_name = image_filename.trim_end_matches(".xz").to_string();
 
-    tracing::info!("Dernière version Raspberry Pi OS: {}", latest_folder.1);
-    tracing::info!("URL: {}", full_url);
+    println!("[Flash] Using Raspberry Pi OS Bookworm: {}", latest_folder.1);
+    println!("[Flash] URL: {}", full_url);
 
     Ok((full_url, extracted_name))
 }
