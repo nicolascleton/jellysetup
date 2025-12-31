@@ -9,8 +9,14 @@ interface CompleteProps {
 }
 
 const services = [
-  { name: 'Jellyfin', port: 8096, icon: '📺' },
-  { name: 'Jellyseerr', port: 5055, icon: '🎬' },
+  { name: 'Jellyfin', port: 8096, icon: '📺', desc: 'Media Server' },
+  { name: 'Jellyseerr', port: 5055, icon: '🎬', desc: 'Requêtes' },
+  { name: 'Radarr', port: 7878, icon: '🎥', desc: 'Films' },
+  { name: 'Sonarr', port: 8989, icon: '📺', desc: 'Séries' },
+  { name: 'Prowlarr', port: 9696, icon: '🔍', desc: 'Indexeurs' },
+  { name: 'Bazarr', port: 6767, icon: '💬', desc: 'Sous-titres' },
+  { name: 'Decypharr', port: 8282, icon: '⬇️', desc: 'Debrid' },
+  { name: 'Supabazarr', port: 8383, icon: '☁️', desc: 'Backup' },
 ];
 
 export default function Complete({ piInfo, onRestart }: CompleteProps) {
@@ -37,20 +43,20 @@ export default function Complete({ piInfo, onRestart }: CompleteProps) {
       </div>
 
       {/* Services */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-4 gap-2">
         {services.map((s) => (
-          <div key={s.name} className="card !p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="text-xl">{s.icon}</span>
-              <span className="font-medium text-white text-sm">{s.name}</span>
+          <button
+            key={s.name}
+            onClick={() => open(getUrl(s.port))}
+            className="card !p-3 hover:bg-zinc-700/50 transition-colors group"
+          >
+            <div className="text-center">
+              <span className="text-2xl block mb-1">{s.icon}</span>
+              <span className="font-medium text-white text-xs block">{s.name}</span>
+              <span className="text-[10px] text-zinc-500">{s.desc}</span>
             </div>
-            <button
-              onClick={() => open(getUrl(s.port))}
-              className="w-full py-2 bg-purple-600 hover:bg-purple-500 text-white text-sm font-medium rounded-lg flex items-center justify-center gap-2"
-            >
-              Ouvrir <ExternalLink className="w-3 h-3" />
-            </button>
-          </div>
+            <ExternalLink className="w-3 h-3 text-zinc-500 group-hover:text-purple-400 mx-auto mt-2" />
+          </button>
         ))}
       </div>
 

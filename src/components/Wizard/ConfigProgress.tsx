@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
+import { listen } from '@tauri-apps/api/event';
 import { Check, Loader2, Cpu, RefreshCw, AlertTriangle } from 'lucide-react';
 import { useStore, PiInfo } from '../../lib/store';
 
@@ -12,13 +13,57 @@ interface ConfigProgressProps {
 export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigProgressProps) {
   const { config, sshCredentials, addLog, setInstallationId } = useStore();
   const [steps] = useState([
-    'Connexion SSH', 'Mise à jour', 'Docker', 'Services', 'Radarr', 'Sonarr', 'Jellyfin', 'Finalisation'
+    'Connexion SSH', 'Mise à jour', 'Docker', 'Reboot', 'Structure', 'Docker Compose', 'Services', 'Configuration', 'Finalisation'
   ]);
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState(0);
+  const [statusMessage, setStatusMessage] = useState('Démarrage...');
   const [error, setError] = useState<string | null>(null);
 
+  // Protection contre les lancements multiples (React StrictMode)
+  const hasStarted = useRef(false);
+
+  // Map des étapes backend vers frontend
+  const stepMap: Record<string, number> = {
+    'update': 1,
+    'docker': 2,
+    'reboot': 3,
+    'structure': 4,
+    'compose_write': 5,
+    'compose_up': 6,
+    'wait_services': 7,
+    'config': 8,
+    'complete': 8,
+  };
+
   useEffect(() => {
+    // Écouter les événements de progression du backend
+    const unlisten = listen<{ step: string; percent: number; message: string }>('flash-progress', (event) => {
+      console.log('[ConfigProgress] Progress event:', event.payload);
+      const { step, percent, message } = event.payload;
+
+      setProgress(percent);
+      setStatusMessage(message);
+
+      if (stepMap[step] !== undefined) {
+        setCurrentStep(stepMap[step]);
+      }
+
+      addLog(message);
+    });
+
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (hasStarted.current) {
+      console.log('[ConfigProgress] Already started, skipping duplicate...');
+      return;
+    }
+    hasStarted.current = true;
+    console.log('[ConfigProgress] Starting installation (first time only)');
     runConfiguration();
   }, []);
 
@@ -82,11 +127,10 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
         });
       }
 
-      for (let i = 2; i < steps.length; i++) {
-        setCurrentStep(i);
-        setProgress(Math.round((i / steps.length) * 100));
-        await new Promise((r) => setTimeout(r, 400));
-      }
+      // Installation terminée - sauvegarder dans Supabase
+      setCurrentStep(steps.length - 1);
+      setProgress(100);
+      setStatusMessage('Installation terminée !');
 
       const installId = await invoke<string>('save_to_supabase', {
         piName: piInfo.hostname,
@@ -135,16 +179,17 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
       {/* Progress */}
       <div className="space-y-2">
         <div className="flex justify-between text-sm">
-          <span className="text-zinc-500">{steps[currentStep]}</span>
+          <span className="text-zinc-400">{statusMessage}</span>
           <span className="text-white font-medium">{progress}%</span>
         </div>
         <div className="h-2 bg-zinc-800 rounded-full overflow-hidden">
           <div className="h-full bg-gradient-to-r from-green-500 to-emerald-400 rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
         </div>
+        <p className="text-xs text-zinc-500 text-center">{steps[currentStep]}</p>
       </div>
 
       {/* Steps grid */}
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-4 sm:grid-cols-6 gap-1.5">
         {steps.map((step, i) => (
           <div key={step} className={`p-2 rounded-lg text-center ${
             i < currentStep ? 'bg-green-500/10' :

@@ -40,9 +40,10 @@ async fn list_sd_cards_macos() -> Result<Vec<SDCard>> {
     println!("{}", stdout);
 
     // Chercher les disques physiques (pas synthesized)
+    // Inclure aussi "external" pour les cartes SD dans lecteur USB
     for line in stdout.lines() {
-        // Format: /dev/disk11 (internal, physical):
-        if line.starts_with("/dev/disk") && line.contains("physical") && !line.contains("synthesized") {
+        // Format: /dev/disk11 (internal, physical): ou /dev/disk11 (external, physical):
+        if line.starts_with("/dev/disk") && (line.contains("physical") || line.contains("external")) && !line.contains("synthesized") {
             // Extraire disk id: "/dev/disk11 (internal, physical):" -> "disk11"
             if let Some(disk_part) = line.split_whitespace().next() {
                 let disk_id = disk_part.trim_start_matches("/dev/");
@@ -103,11 +104,13 @@ async fn get_disk_info(disk_id: &str) -> Option<SDCard> {
     let partition_id = format!("{}s1", disk_id);
     let volume_name = get_volume_name(&partition_id).unwrap_or_default();
 
-    // Nom final: nom du volume si disponible, sinon disk_id
+    // Nom final: nom du volume si disponible, sinon indication claire
+    let size_gb = size / 1024 / 1024 / 1024;
     let display_name = if volume_name.is_empty() || volume_name == "Not applicable (no file system)" {
-        format!("{} - Carte SD", disk_id)
+        // Carte flashée avec Linux ou vide - afficher la taille pour aider l'utilisateur
+        format!("Carte SD {}GB ({})", size_gb, disk_id)
     } else {
-        format!("{} ({})", volume_name, disk_id)
+        format!("{} - {}GB ({})", volume_name, size_gb, disk_id)
     };
 
     println!("[SD Detection] {} -> {} ({} GB)", disk_id, display_name, size / 1024 / 1024 / 1024);

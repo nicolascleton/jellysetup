@@ -1,6 +1,6 @@
 [package]
 name = "jellysetup"
-version = "1.0.0"
+version = "1.1.0"
 description = "Raspberry Pi Media Center Setup Tool"
 authors = ["Nicolas Cleton"]
 license = "MIT"
@@ -63,6 +63,9 @@ regex = "1.10"
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for session IDs
+uuid = { version = "1.6", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS specific disk operations

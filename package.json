@@ -1,6 +1,6 @@
 {
   "name": "jellysetup",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Application de configuration automatique Raspberry Pi Media Center",
   "private": true,
   "type": "module",

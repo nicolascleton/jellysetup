@@ -33,3 +33,4 @@ src-tauri/icons/*.icns
 # Cache
 .cache/
 *.cache
+.env

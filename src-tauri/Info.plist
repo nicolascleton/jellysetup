@@ -7,5 +7,16 @@
 
     <key>NSSystemAdministrationUsageDescription</key>
     <string>JellySetup a besoin des privilèges administrateur pour écrire l'image sur la carte SD.</string>
+
+    <!-- Requis pour la découverte locale Bonjour/mDNS -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>JellySetup recherche votre Raspberry Pi sur le réseau local via Bonjour/mDNS.</string>
+
+    <!-- Services Bonjour utilisés (SSH) -->
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_ssh._tcp</string>
+        <string>_sftp-ssh._tcp</string>
+    </array>
 </dict>
 </plist>

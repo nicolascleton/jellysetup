@@ -24,75 +24,86 @@ pub async fn discover_raspberry_pi(hostname: &str, timeout_secs: u64) -> Result<
     Ok(None)
 }
 
+/// Helper pour logger dans un fichier
+fn log_to_file(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/jellysetup_discovery.log") {
+        let _ = writeln!(f, "{}", msg);
+    }
+}
+
 /// Découverte via mDNS (hostname.local)
 async fn discover_via_mdns(hostname: &str) -> Result<Option<PiInfo>> {
-    println!("[Discovery] Searching for {}.local...", hostname);
+    log_to_file(&format!("discover_via_mdns START for {}.local", hostname));
 
-    // Méthode 1: Utiliser ping + dscacheutil sur macOS
+    // Méthode SIMPLE: ping et extraire l'IP
     #[cfg(target_os = "macos")]
     {
         use tokio::process::Command;
         let full_hostname = format!("{}.local", hostname);
 
-        // D'abord ping pour peupler le cache DNS (mDNS)
-        println!("[Discovery] Ping {} to populate DNS cache...", full_hostname);
-        let ping_result = Command::new("ping")
-            .args(["-c", "1", "-W", "2", &full_hostname])
+        log_to_file(&format!("Ping {}...", full_hostname));
+        // IMPORTANT: Utiliser le chemin absolu car le PATH des apps GUI ne contient pas /sbin
+        let ping_result = Command::new("/sbin/ping")
+            .args(["-c", "1", "-W", "3", &full_hostname])
             .output()
             .await;
 
-        if let Ok(output) = ping_result {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            println!("[Discovery] Ping output: {}", stdout.lines().next().unwrap_or(""));
+        match ping_result {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                log_to_file(&format!("Ping exit status: {:?}", output.status));
+                log_to_file(&format!("Ping stdout: {}", stdout));
+                if !stderr.is_empty() {
+                    log_to_file(&format!("Ping stderr: {}", stderr));
+                }
 
-            // Extraire l'IP directement du ping si possible
-            // Format: "PING jellypi.local (192.168.1.106): 56 data bytes"
-            if let Some(line) = stdout.lines().next() {
-                if let Some(start) = line.find('(') {
-                    if let Some(end) = line.find(')') {
-                        let ip_str = &line[start + 1..end];
-                        println!("[Discovery] Extracted IP from ping: {}", ip_str);
-                        if is_ssh_available(ip_str).await {
-                            println!("[Discovery] SSH available on {}", ip_str);
-                            return Ok(Some(PiInfo {
-                                ip: ip_str.to_string(),
-                                hostname: hostname.to_string(),
-                                mac_address: None,
-                            }));
+                // Format: "PING jellypi.local (192.168.1.106): 56 data bytes"
+                if let Some(line) = stdout.lines().next() {
+                    log_to_file(&format!("First line: {}", line));
+                    if let Some(start) = line.find('(') {
+                        if let Some(end) = line.find(')') {
+                            let ip_str = &line[start + 1..end];
+                            log_to_file(&format!("Extracted IP: {}", ip_str));
+
+                            // Vérifier SSH avec nc (plus fiable)
+                            // IMPORTANT: Utiliser le chemin absolu
+                            let nc_result = Command::new("/usr/bin/nc")
+                                .args(["-z", "-w", "2", ip_str, "22"])
+                                .output()
+                                .await;
+
+                            if nc_result.map(|o| o.status.success()).unwrap_or(false) {
+                                log_to_file(&format!("SSH OK on {}", ip_str));
+                                return Ok(Some(PiInfo {
+                                    ip: ip_str.to_string(),
+                                    hostname: hostname.to_string(),
+                                    mac_address: None,
+                                }));
+                            } else {
+                                log_to_file("SSH check failed, returning IP anyway");
+                                // Retourner l'IP quand même, on vérifiera SSH plus tard
+                                return Ok(Some(PiInfo {
+                                    ip: ip_str.to_string(),
+                                    hostname: hostname.to_string(),
+                                    mac_address: None,
+                                }));
+                            }
+                        } else {
+                            log_to_file("Could not find closing ')' in ping output");
                         }
-                    }
-                }
-            }
-        }
-
-        // Fallback: dscacheutil (le cache devrait être peuplé maintenant)
-        println!("[Discovery] Fallback to dscacheutil for {}", full_hostname);
-        if let Ok(output) = Command::new("dscacheutil")
-            .args(["-q", "host", "-a", "name", &full_hostname])
-            .output()
-            .await
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            println!("[Discovery] dscacheutil output: {}", stdout);
-
-            for line in stdout.lines() {
-                if line.starts_with("ip_address:") {
-                    let ip_str = line.trim_start_matches("ip_address:").trim();
-                    println!("[Discovery] Found IP: {}", ip_str);
-                    if is_ssh_available(ip_str).await {
-                        println!("[Discovery] SSH available on {}", ip_str);
-                        return Ok(Some(PiInfo {
-                            ip: ip_str.to_string(),
-                            hostname: hostname.to_string(),
-                            mac_address: None,
-                        }));
                     } else {
-                        println!("[Discovery] SSH not available on {}", ip_str);
+                        log_to_file("Could not find '(' in ping output");
                     }
+                } else {
+                    log_to_file("No lines in ping output");
                 }
             }
-        } else {
-            println!("[Discovery] dscacheutil failed");
+            Err(e) => {
+                log_to_file(&format!("Ping command failed to execute: {:?}", e));
+                log_to_file("This usually means /sbin/ping is not accessible from GUI app");
+            }
         }
     }
 
@@ -228,7 +239,8 @@ pub async fn ping(ip: &str) -> bool {
     #[cfg(target_os = "macos")]
     {
         use tokio::process::Command;
-        let output = Command::new("ping")
+        // Chemin absolu pour les apps GUI
+        let output = Command::new("/sbin/ping")
             .args(["-c", "1", "-W", "1", ip])
             .output()
             .await;

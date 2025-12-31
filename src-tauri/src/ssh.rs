@@ -2,6 +2,11 @@ use anyhow::{anyhow, Result};
 use russh::*;
 use russh_keys::*;
 use std::sync::Arc;
+use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+// Stockage temporaire du dernier fingerprint capturé
+static LAST_HOST_FINGERPRINT: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
 struct Client {}
 
@@ -11,12 +16,46 @@ impl client::Handler for Client {
 
     async fn check_server_key(
         self,
-        _server_public_key: &russh_keys::key::PublicKey,
+        server_public_key: &russh_keys::key::PublicKey,
     ) -> std::result::Result<(Self, bool), Self::Error> {
-        // Accepter toutes les clés (première connexion)
-        // En production, on devrait vérifier le fingerprint
+        // Capturer le fingerprint SHA256 de la clé host
+        let fingerprint = server_public_key.fingerprint();
+        println!("[SSH] Host fingerprint: {}", fingerprint);
+
+        // Stocker le fingerprint pour récupération ultérieure
+        if let Ok(mut fp) = LAST_HOST_FINGERPRINT.lock() {
+            *fp = Some(fingerprint);
+        }
+
+        // Accepter toutes les clés (on vérifie/stocke le fingerprint dans Supabase)
         Ok((self, true))
     }
+}
+
+/// Récupère le dernier fingerprint SSH host capturé
+pub fn get_last_host_fingerprint() -> Option<String> {
+    LAST_HOST_FINGERPRINT.lock().ok().and_then(|fp| fp.clone())
+}
+
+/// Nettoie le known_hosts local pour une IP donnée
+pub fn clear_known_hosts_for_ip(ip: &str) -> Result<()> {
+    use std::process::Command;
+
+    println!("[SSH] Clearing known_hosts entry for {}...", ip);
+
+    // ssh-keygen -R <ip>
+    let output = Command::new("ssh-keygen")
+        .args(["-R", ip])
+        .output()?;
+
+    if output.status.success() {
+        println!("[SSH] Cleared known_hosts entry for {}", ip);
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("[SSH] Warning clearing known_hosts: {}", stderr);
+    }
+
+    Ok(())
 }
 
 /// Teste la connexion SSH avec clé privée
@@ -41,14 +80,34 @@ pub async fn test_connection(host: &str, username: &str, private_key: &str) -> R
 pub async fn test_connection_password(host: &str, username: &str, password: &str) -> Result<bool> {
     println!("[SSH] Connecting to {}@{}...", username, host);
 
-    let config = client::Config::default();
-    let config = Arc::new(config);
+    // Retry logic pour gérer "No route to host" transitoire
+    let mut session = None;
+    let mut last_error = None;
 
-    let mut session = match client::connect(config, (host, 22), Client {}).await {
-        Ok(s) => s,
-        Err(e) => {
-            println!("[SSH] Connection failed: {}", e);
-            return Err(anyhow!("Connection failed: {}", e));
+    for attempt in 1..=3 {
+        let config = client::Config::default();
+        let config = Arc::new(config);
+
+        match client::connect(config, (host, 22), Client {}).await {
+            Ok(s) => {
+                println!("[SSH] test_connection: connected (attempt {})", attempt);
+                session = Some(s);
+                break;
+            }
+            Err(e) => {
+                println!("[SSH] test_connection: failed (attempt {}): {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            return Err(anyhow!("Connection failed after 3 attempts: {}", last_error.unwrap()));
         }
     };
 
@@ -77,12 +136,38 @@ pub async fn execute_command(
     private_key: &str,
     command: &str,
 ) -> Result<String> {
-    let config = client::Config::default();
-    let config = Arc::new(config);
-
     let key = russh_keys::decode_secret_key(private_key, None)?;
 
-    let mut session = client::connect(config, (host, 22), Client {}).await?;
+    // Retry logic pour gérer "No route to host" transitoire
+    let mut session = None;
+    let mut last_error = None;
+
+    for attempt in 1..=3 {
+        let config = client::Config::default();
+        let config = Arc::new(config);
+
+        match client::connect(config, (host, 22), Client {}).await {
+            Ok(s) => {
+                println!("[SSH] execute_command: connected (attempt {})", attempt);
+                session = Some(s);
+                break;
+            }
+            Err(e) => {
+                println!("[SSH] execute_command: connection failed (attempt {}): {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    }
+
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            return Err(anyhow!("Connection failed after 3 attempts: {:?}", last_error));
+        }
+    };
 
     let auth_result = session
         .authenticate_publickey(username, Arc::new(key))
@@ -105,17 +190,35 @@ pub async fn execute_command_password(
     println!("[SSH] exec_password: connecting to {}@{}", username, host);
     println!("[SSH] Command: {}", &command[..command.len().min(100)]);
 
-    let config = client::Config::default();
-    let config = Arc::new(config);
+    // Retry logic pour gérer "No route to host" transitoire
+    let mut session = None;
+    let mut last_error = None;
 
-    let mut session = match client::connect(config, (host, 22), Client {}).await {
-        Ok(s) => {
-            println!("[SSH] exec_password: connected");
-            s
+    for attempt in 1..=3 {
+        let config = client::Config::default();
+        let config = Arc::new(config);
+
+        match client::connect(config, (host, 22), Client {}).await {
+            Ok(s) => {
+                println!("[SSH] exec_password: connected (attempt {})", attempt);
+                session = Some(s);
+                break;
+            }
+            Err(e) => {
+                println!("[SSH] exec_password: connection failed (attempt {}): {}", attempt, e);
+                last_error = Some(e);
+                if attempt < 3 {
+                    // Attendre 2 secondes avant de réessayer
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
         }
-        Err(e) => {
-            println!("[SSH] exec_password: connection failed: {}", e);
-            return Err(anyhow!("Connection failed: {}", e));
+    }
+
+    let mut session = match session {
+        Some(s) => s,
+        None => {
+            return Err(anyhow!("Connection failed after 3 attempts: {}", last_error.unwrap()));
         }
     };
 

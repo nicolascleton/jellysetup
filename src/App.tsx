@@ -144,6 +144,7 @@ function App() {
       case 'waiting':
         return (
           <WaitingPi
+            isQuickConnect={flowMode === 'connect'}
             onPiFound={(info) => {
               setPiInfo(info);
               setStep('configure');

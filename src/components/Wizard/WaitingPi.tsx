@@ -4,12 +4,16 @@ import { ArrowLeft, Loader2, Wifi, RefreshCw, CheckCircle2, Edit3, Search } from
 import { useStore, PiInfo } from '../../lib/store';
 
 interface WaitingPiProps {
+  isQuickConnect?: boolean;  // true = Pi déjà configuré, pas besoin d'attendre le boot
   onPiFound: (info: PiInfo) => void;
   onBack: () => void;
 }
 
-export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
+export default function WaitingPi({ isQuickConnect = false, onPiFound, onBack }: WaitingPiProps) {
   const { config, addLog, setConfig } = useStore();
+  // En mode QuickConnect, on démarre la recherche immédiatement
+  const [readyToSearch, setReadyToSearch] = useState(isQuickConnect);
+  const [countdown, setCountdown] = useState(0);
   const [attempts, setAttempts] = useState(0);
   const [manualMode, setManualMode] = useState(false);
   const [manualInput, setManualInput] = useState('');
@@ -22,8 +26,23 @@ export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
   onPiFoundRef.current = onPiFound;
   addLogRef.current = addLog;
 
+  // Countdown quand l'utilisateur clique sur "J'ai inséré la carte"
   useEffect(() => {
-    if (manualMode) return;
+    if (countdown <= 0) return;
+
+    const timer = setTimeout(() => {
+      if (countdown === 1) {
+        setReadyToSearch(true);
+      }
+      setCountdown(countdown - 1);
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [countdown]);
+
+  // Recherche du Pi (seulement quand readyToSearch est true)
+  useEffect(() => {
+    if (manualMode || !readyToSearch) return;
 
     let cancelled = false;
     let currentAttempt = 0;
@@ -41,7 +60,7 @@ export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
         console.log('[WaitingPi] Calling discover_pi...');
         const piInfo = await invoke<PiInfo | null>('discover_pi', {
           hostname: hostname,
-          timeout_secs: 10,
+          timeoutSecs: 10,  // camelCase requis par Tauri!
         });
         console.log('[WaitingPi] discover_pi returned:', piInfo);
 
@@ -67,7 +86,13 @@ export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
       cancelled = true;
       clearInterval(searchInterval);
     };
-  }, [config.hostname, manualMode]);
+  }, [config.hostname, manualMode, readyToSearch]);
+
+  const handleStartSearch = () => {
+    // Démarrer un countdown de 90 secondes pour laisser le Pi booter
+    setCountdown(90);
+    addLog("Attente du démarrage du Pi (90s)...");
+  };
 
   const handleManualConnect = async () => {
     setInputError('');
@@ -97,7 +122,7 @@ export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
         // Essayer de résoudre le hostname via mDNS
         const piInfo = await invoke<PiInfo | null>('discover_pi', {
           hostname: hostname,
-          timeout_secs: 10,
+          timeoutSecs: 10,  // camelCase requis par Tauri!
         });
 
         if (piInfo) {
@@ -118,22 +143,65 @@ export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header - différent selon le mode */}
       <div className="text-center">
-        <div className="w-16 h-16 mx-auto bg-gradient-to-br from-green-400 to-emerald-500 rounded-2xl flex items-center justify-center mb-4">
-          <CheckCircle2 className="w-8 h-8 text-white" />
+        {isQuickConnect ? (
+          <>
+            <div className="w-16 h-16 mx-auto bg-gradient-to-br from-blue-400 to-blue-600 rounded-2xl flex items-center justify-center mb-4">
+              <Search className="w-8 h-8 text-white" />
+            </div>
+            <h3 className="text-lg font-semibold text-white mb-1">Recherche du Pi</h3>
+            <p className="text-sm text-zinc-400">Connexion au Pi existant...</p>
+          </>
+        ) : (
+          <>
+            <div className="w-16 h-16 mx-auto bg-gradient-to-br from-green-400 to-emerald-500 rounded-2xl flex items-center justify-center mb-4">
+              <CheckCircle2 className="w-8 h-8 text-white" />
+            </div>
+            <h3 className="text-lg font-semibold text-white mb-1">Carte SD prête !</h3>
+          </>
+        )}
+      </div>
+
+      {/* Instructions - seulement en mode full (pas QuickConnect) et avant la recherche */}
+      {!isQuickConnect && !readyToSearch && countdown === 0 && (
+        <>
+          <div className="grid grid-cols-2 gap-2 text-sm">
+            {['1. Retirez la carte SD', '2. Insérez dans le Pi', '3. Branchez le Pi', '4. Cliquez ci-dessous'].map((text, i) => (
+              <div key={i} className={`card !p-3 text-center ${i === 3 ? 'text-green-400 border border-green-500/30' : 'text-zinc-300'}`}>{text}</div>
+            ))}
+          </div>
+
+          {/* Bouton principal - Lancer la recherche */}
+          <button
+            onClick={handleStartSearch}
+            className="w-full btn-primary !py-4 text-base"
+          >
+            <CheckCircle2 className="w-5 h-5" />
+            J'ai inséré la carte et branché le Pi
+          </button>
+        </>
+      )}
+
+      {/* Countdown - attente du boot */}
+      {countdown > 0 && (
+        <div className="card !p-6 text-center space-y-4">
+          <div className="w-20 h-20 mx-auto rounded-full border-4 border-blue-500 flex items-center justify-center">
+            <span className="text-3xl font-bold text-white">{countdown}</span>
+          </div>
+          <p className="text-zinc-400">Démarrage du Pi en cours...</p>
+          <p className="text-xs text-zinc-500">La recherche commencera automatiquement</p>
+          <button
+            onClick={() => { setCountdown(0); setReadyToSearch(true); }}
+            className="text-sm text-blue-400 hover:text-blue-300"
+          >
+            Passer l'attente →
+          </button>
         </div>
-        <h3 className="text-lg font-semibold text-white mb-1">Carte SD prête !</h3>
-      </div>
+      )}
 
-      {/* Instructions compactes */}
-      <div className="grid grid-cols-2 gap-2 text-sm">
-        {['1. Retirez la carte', '2. Insérez dans le Pi', '3. Branchez le Pi', '4. Patientez 2min'].map((text, i) => (
-          <div key={i} className="card !p-3 text-center text-zinc-300">{text}</div>
-        ))}
-      </div>
-
-      {!manualMode ? (
+      {/* Recherche en cours */}
+      {readyToSearch && !manualMode && (
         <>
           {/* Status recherche auto */}
           <div className="card !p-4 flex items-center gap-4">
@@ -158,7 +226,9 @@ export default function WaitingPi({ onPiFound, onBack }: WaitingPiProps) {
             Connexion manuelle (IP ou hostname)
           </button>
         </>
-      ) : (
+      )}
+
+      {manualMode && (
         <>
           {/* Mode manuel */}
           <div className="card !p-4 space-y-3">

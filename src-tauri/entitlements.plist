@@ -29,5 +29,13 @@
     <!-- Désactiver la validation de bibliothèque -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
+
+    <!-- Accès réseau sortant (requis pour Tauri et mDNS) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- Accès réseau entrant (requis pour mDNS discovery) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
 </dict>
 </plist>

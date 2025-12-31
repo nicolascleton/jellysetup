@@ -7,6 +7,7 @@ mod network;
 mod supabase;
 mod flash;
 mod crypto;
+mod logging;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, Window};
@@ -154,7 +155,10 @@ async fn flash_sd_card(
 /// Découvre le Raspberry Pi sur le réseau
 #[tauri::command]
 async fn discover_pi(hostname: String, timeout_secs: u64) -> Result<Option<PiInfo>, String> {
-    println!("[CMD discover_pi] Called with hostname={}, timeout={}s", hostname, timeout_secs);
+    // Log dans un fichier car stdout/stderr sont avalés sur macOS GUI
+    use std::io::Write;
+    let _ = std::fs::write("/tmp/jellysetup_discovery.log",
+        format!("discover_pi CALLED: hostname={}, timeout={}s\n", hostname, timeout_secs));
     let result = network::discover_raspberry_pi(&hostname, timeout_secs)
         .await
         .map_err(|e| {
@@ -210,8 +214,9 @@ async fn run_installation(
     username: String,
     private_key: String,
     config: InstallConfig,
-    hostname: String,
 ) -> Result<(), String> {
+    // Extraire le hostname depuis l'adresse (comme pour la version password)
+    let hostname = host.replace(".local", "");
     flash::run_full_installation(window, &host, &username, &private_key, config, &hostname)
         .await
         .map_err(|e| e.to_string())
@@ -231,24 +236,32 @@ async fn run_installation_password(
         .map_err(|e| e.to_string())
 }
 
-/// Sauvegarde les credentials dans Supabase
+/// Sauvegarde les credentials dans Supabase (ne bloque jamais)
 #[tauri::command]
 async fn save_to_supabase(
     pi_name: String,
     pi_ip: String,
     ssh_public_key: String,
     ssh_private_key_encrypted: String,
+    ssh_host_fingerprint: Option<String>,
     installer_version: String,
 ) -> Result<String, String> {
-    supabase::save_installation(
+    match supabase::save_installation(
         &pi_name,
         &pi_ip,
-        &ssh_public_key,
-        &ssh_private_key_encrypted,
+        Some(&ssh_public_key),
+        Some(&ssh_private_key_encrypted),
+        ssh_host_fingerprint.as_deref(),
         &installer_version,
     )
-    .await
-    .map_err(|e| e.to_string())
+    .await {
+        Ok(id) => Ok(id),
+        Err(e) => {
+            println!("[Supabase] Warning: save_installation failed: {}", e);
+            // Ne pas bloquer l'installation - retourner un ID local
+            Ok("local".to_string())
+        }
+    }
 }
 
 /// Récupère la procédure depuis GitHub
@@ -300,6 +313,18 @@ fn restart_app(app_handle: tauri::AppHandle) {
     }
 }
 
+/// Récupère le dernier fingerprint SSH host capturé
+#[tauri::command]
+fn get_ssh_host_fingerprint() -> Option<String> {
+    ssh::get_last_host_fingerprint()
+}
+
+/// Nettoie le known_hosts local pour une IP
+#[tauri::command]
+fn clear_known_hosts(ip: String) -> Result<(), String> {
+    ssh::clear_known_hosts_for_ip(&ip).map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -324,6 +349,8 @@ fn main() {
             check_disk_access,
             open_disk_access_settings,
             restart_app,
+            get_ssh_host_fingerprint,
+            clear_known_hosts,
         ])
         .setup(|app| {
             let window = app.get_window("main").unwrap();

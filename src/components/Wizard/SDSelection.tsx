@@ -57,13 +57,22 @@ export default function SDSelection({ onNext, onBack }: SDSelectionProps) {
             <p className="text-sm text-zinc-500">Recherche...</p>
           </div>
         ) : sdCards.length === 0 ? (
-          <div className="card !p-8 text-center">
-            <HardDrive className="w-6 h-6 text-zinc-600 mx-auto mb-2" />
-            <p className="text-sm text-zinc-400">Aucune carte SD</p>
+          <div className="card !p-6 text-center space-y-3">
+            <HardDrive className="w-6 h-6 text-zinc-600 mx-auto" />
+            <p className="text-sm text-zinc-400">Aucune carte SD détectée</p>
+            <div className="text-xs text-zinc-500 bg-zinc-800/50 rounded-lg p-3 text-left">
+              <p className="font-medium text-zinc-400 mb-1">Conseils :</p>
+              <ul className="list-disc list-inside space-y-1">
+                <li>Vérifiez que la carte est bien insérée</li>
+                <li>Si elle a déjà été flashée, <span className="text-purple-400">retirez-la et réinsérez-la</span></li>
+                <li>Utilisez une carte de 16 GB minimum</li>
+              </ul>
+            </div>
           </div>
         ) : (
           sdCards.map((card) => {
             const isSelected = selectedSD?.path === card.path;
+            const isTooSmall = card.size < 16 * 1024 * 1024 * 1024; // < 16 GB
             return (
               <button
                 key={card.path}
@@ -79,7 +88,10 @@ export default function SDSelection({ onNext, onBack }: SDSelectionProps) {
                     <HardDrive className={`w-5 h-5 ${isSelected ? 'text-purple-400' : 'text-zinc-400'}`} />
                     <div>
                       <p className="font-medium text-white text-sm">{card.name}</p>
-                      <p className="text-xs text-zinc-500">{formatSize(card.size)}</p>
+                      <p className="text-xs text-zinc-500">
+                        {formatSize(card.size)}
+                        {isTooSmall && <span className="text-amber-400 ml-2">⚠ Trop petite (min 16 GB)</span>}
+                      </p>
                     </div>
                   </div>
                   {isSelected && <Check className="w-5 h-5 text-purple-400" />}

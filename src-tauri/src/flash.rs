@@ -162,6 +162,24 @@ pub async fn flash_raspberry_pi_os(
     // Garantir qu'on libère le lock même en cas d'erreur
     let _guard = FlashGuard;
 
+    // Empêcher la mise en veille du Mac pendant le flash
+    #[cfg(target_os = "macos")]
+    let _caffeinate = {
+        match std::process::Command::new("caffeinate")
+            .args(["-dims"]) // display, idle, disk, system sleep prevention
+            .spawn()
+        {
+            Ok(child) => {
+                println!("[FLASH] caffeinate started (PID: {})", child.id());
+                Some(child)
+            }
+            Err(e) => {
+                println!("[FLASH] Warning: could not start caffeinate: {}", e);
+                None
+            }
+        }
+    };
+
     let cache_dir = dirs::cache_dir()
         .ok_or_else(|| anyhow!("Cannot find cache directory"))?
         .join("jellysetup");
@@ -459,7 +477,7 @@ async fn write_image_to_sd(_window: &Window, image: &Path, sd_path: &str) -> Res
         // Monitorer la progression en lisant le log de dd
         let start_time = std::time::Instant::now();
         let mut last_percent = 0u32;
-        let mut current_speed: f64 = 6.5; // Vitesse initiale estimée en MB/s
+        let mut current_speed: f64 = 3.0; // Vitesse initiale estimée en MB/s (conservateur pour SD)
         let mut iteration = 0u32;
 
         loop {
@@ -989,6 +1007,12 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8383/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 "#);
 
     // Ajouter Cloudflared si token fourni
@@ -1040,7 +1064,7 @@ pub async fn run_full_installation(
     // Étape 1: Mise à jour système
     emit_progress(&window, "update", 0, "Mise à jour système...", None);
     ssh::execute_command(host, username, private_key,
-        "sudo apt update && sudo apt upgrade -y && sudo apt install -y git curl"
+        "sudo DEBIAN_FRONTEND=noninteractive apt update && sudo DEBIAN_FRONTEND=noninteractive apt upgrade -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' && sudo apt install -y git curl"
     ).await?;
 
     // Étape 2: Installation Docker
@@ -1092,11 +1116,314 @@ pub async fn run_full_installation(
     // Étape 8: Configuration des services via API
     emit_progress(&window, "config", 85, "Configuration des services...", None);
 
-    // TODO: Configurer Radarr, Sonarr, Prowlarr, Jellyfin via leurs APIs
-    // - Ajouter root folders
-    // - Configurer download clients
-    // - Ajouter indexeurs YGG si passkey fourni
-    // - Créer utilisateur Jellyfin
+    // 8.1: Attendre que Jellyfin soit prêt (max 2 min)
+    emit_progress(&window, "config", 86, "Attente de Jellyfin...", None);
+    let mut jellyfin_ready = false;
+    for i in 0..24 {
+        let check = ssh::execute_command(host, username, private_key,
+            "curl -s -o /dev/null -w '%{http_code}' http://localhost:8096/health 2>/dev/null || echo 000"
+        ).await.unwrap_or_default();
+        if check.trim() == "200" {
+            jellyfin_ready = true;
+            println!("[Config] Jellyfin is ready");
+            break;
+        }
+        println!("[Config] Waiting for Jellyfin ({}/24)...", i + 1);
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if jellyfin_ready {
+        // 8.2: Configurer Jellyfin via l'API Startup (compatible Jellyfin 10.11.x)
+        emit_progress(&window, "config", 87, "Configuration Jellyfin...", None);
+
+        let jf_user = config.jellyfin_username.replace("\\", "\\\\").replace("\"", "\\\"");
+        let jf_pass = config.jellyfin_password.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        // Étape 1: Initialiser l'utilisateur (GET /Startup/FirstUser créé l'utilisateur par défaut)
+        // En Jellyfin 10.11.x, il faut GET FirstUser avant de pouvoir POST User
+        let first_user_cmd = "curl -s 'http://localhost:8096/Startup/FirstUser'";
+        let first_user_result = ssh::execute_command(host, username, private_key, first_user_cmd).await.unwrap_or_default();
+        println!("[Config] Jellyfin FirstUser: {}", first_user_result);
+
+        // Petite pause pour laisser Jellyfin créer l'utilisateur
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // Étape 2: Configuration initiale (langue, métadonnées)
+        let startup_config_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/Configuration' \
+            -H 'Content-Type: application/json' \
+            -d '{"UICulture":"fr","MetadataCountryCode":"FR","PreferredMetadataLanguage":"fr"}'"#;
+        ssh::execute_command(host, username, private_key, startup_config_cmd).await.ok();
+
+        // Étape 3: Mettre à jour l'utilisateur admin (POST /Startup/User)
+        let startup_user_cmd = format!(
+            r#"curl -s -X POST 'http://localhost:8096/Startup/User' \
+            -H 'Content-Type: application/json' \
+            -d '{{"Name":"{}","Password":"{}"}}'  "#,
+            jf_user, jf_pass
+        );
+        let user_result = ssh::execute_command(host, username, private_key, &startup_user_cmd).await;
+        match &user_result {
+            Ok(r) => println!("[Config] Jellyfin user updated: {}", r),
+            Err(e) => println!("[Config] Jellyfin user update warning: {}", e),
+        }
+
+        // Étape 4: Activer l'accès distant
+        let remote_access_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/RemoteAccess' \
+            -H 'Content-Type: application/json' \
+            -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}'"#;
+        ssh::execute_command(host, username, private_key, remote_access_cmd).await.ok();
+
+        // Étape 5: Compléter le wizard
+        ssh::execute_command(host, username, private_key, "curl -s -X POST 'http://localhost:8096/Startup/Complete'").await.ok();
+        println!("[Config] Jellyfin setup wizard completed");
+
+        // S'authentifier pour créer les bibliothèques
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let auth_cmd = format!(r#"curl -s -X POST 'http://localhost:8096/Users/AuthenticateByName' \
+            -H 'Content-Type: application/json' \
+            -H 'X-Emby-Authorization: MediaBrowser Client="JellySetup", Device="RaspberryPi", DeviceId="jellysetup-install", Version="1.0.0"' \
+            -d '{{"Username":"{}","Pw":"{}"}}'  "#, jf_user, jf_pass);
+        let auth_result = ssh::execute_command(host, username, private_key, &auth_cmd).await.unwrap_or_default();
+
+        if let Some(token_start) = auth_result.find("\"AccessToken\":\"") {
+            let token_rest = &auth_result[token_start + 15..];
+            if let Some(token_end) = token_rest.find("\"") {
+                let jellyfin_token = &token_rest[..token_end];
+                println!("[Config] Jellyfin authenticated, creating libraries...");
+
+                // Créer bibliothèque Films (format simplifié avec paths= dans l'URL)
+                let movies_lib_cmd = format!(
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&paths=/mnt/decypharr/movies&refreshLibrary=false' -H 'X-Emby-Token: {}'",
+                    jellyfin_token
+                );
+                ssh::execute_command(host, username, private_key, &movies_lib_cmd).await.ok();
+
+                // Créer bibliothèque Séries
+                let tv_lib_cmd = format!(
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Series&collectionType=tvshows&paths=/mnt/decypharr/tv&refreshLibrary=false' -H 'X-Emby-Token: {}'",
+                    jellyfin_token
+                );
+                ssh::execute_command(host, username, private_key, &tv_lib_cmd).await.ok();
+                println!("[Config] Jellyfin: Libraries created");
+            }
+        }
+    }
+
+    // 8.3: Configurer Decypharr avec AllDebrid
+    emit_progress(&window, "config", 89, "Configuration Decypharr...", None);
+    if !config.alldebrid_api_key.is_empty() {
+        let ad_key = config.alldebrid_api_key.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        let decypharr_config = format!(r#"{{
+  "qbit": {{
+    "port": 8282,
+    "username": "",
+    "password": "",
+    "download_folder": "/mnt/decypharr/qbit/downloads",
+    "categories": {{
+      "radarr": "/mnt/decypharr/movies",
+      "sonarr": "/mnt/decypharr/tv"
+    }}
+  }},
+  "debrids": [
+    {{
+      "name": "alldebrid",
+      "enabled": true,
+      "api_key": "{}",
+      "folder": "/mnt/decypharr/alldebrid",
+      "download_uncached": true
+    }}
+  ],
+  "repair": {{
+    "enabled": true,
+    "interval": "1h"
+  }}
+}}"#, ad_key);
+
+        let write_config_cmd = format!(
+            "cat > ~/media-stack/decypharr/config.json << 'EOFDECYPHARR'\n{}\nEOFDECYPHARR",
+            decypharr_config
+        );
+        ssh::execute_command(host, username, private_key, &write_config_cmd).await.ok();
+        ssh::execute_command(host, username, private_key, "docker restart decypharr").await.ok();
+        println!("[Config] Decypharr configured with AllDebrid");
+    }
+
+    // 8.4: Configurer Radarr/Sonarr
+    emit_progress(&window, "config", 91, "Configuration Radarr/Sonarr...", None);
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    let radarr_api = ssh::execute_command(host, username, private_key,
+        "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/radarr/config.xml 2>/dev/null || echo ''"
+    ).await.unwrap_or_default().trim().to_string();
+
+    let sonarr_api = ssh::execute_command(host, username, private_key,
+        "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/sonarr/config.xml 2>/dev/null || echo ''"
+    ).await.unwrap_or_default().trim().to_string();
+
+    let prowlarr_api = ssh::execute_command(host, username, private_key,
+        "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/prowlarr/config.xml 2>/dev/null || echo ''"
+    ).await.unwrap_or_default().trim().to_string();
+
+    // Ajouter Decypharr à Radarr
+    if !radarr_api.is_empty() {
+        let radarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/downloadclient' \
+            -H 'X-Api-Key: {}' \
+            -H 'Content-Type: application/json' \
+            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "localhost"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "movieCategory", "value": "radarr"}}]}}'"#, radarr_api);
+        ssh::execute_command(host, username, private_key, &radarr_client_cmd).await.ok();
+    }
+
+    // Ajouter Decypharr à Sonarr
+    if !sonarr_api.is_empty() {
+        let sonarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/downloadclient' \
+            -H 'X-Api-Key: {}' \
+            -H 'Content-Type: application/json' \
+            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "localhost"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "tvCategory", "value": "sonarr"}}]}}'"#, sonarr_api);
+        ssh::execute_command(host, username, private_key, &sonarr_client_cmd).await.ok();
+    }
+
+    // 8.4b: Ajouter les Root Folders
+    if !radarr_api.is_empty() {
+        let radarr_root_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/rootfolder' \
+            -H 'X-Api-Key: {}' -H 'Content-Type: application/json' \
+            -d '{{"path": "/mnt/decypharr/movies"}}'"#, radarr_api);
+        ssh::execute_command(host, username, private_key, &radarr_root_cmd).await.ok();
+    }
+
+    if !sonarr_api.is_empty() {
+        let sonarr_root_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/rootfolder' \
+            -H 'X-Api-Key: {}' -H 'Content-Type: application/json' \
+            -d '{{"path": "/mnt/decypharr/tv"}}'"#, sonarr_api);
+        ssh::execute_command(host, username, private_key, &sonarr_root_cmd).await.ok();
+    }
+
+    // 8.5: Configurer Prowlarr avec YGG
+    emit_progress(&window, "config", 94, "Configuration Prowlarr...", None);
+    if let Some(ref ygg_passkey) = config.ygg_passkey {
+        if !ygg_passkey.is_empty() && !prowlarr_api.is_empty() {
+            let passkey = ygg_passkey.replace("\\", "\\\\").replace("\"", "\\\"");
+
+            let prowlarr_ygg_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/indexer' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{"name": "YGGTorrent", "definitionName": "yggtorrent", "implementation": "YggTorrent", "configContract": "YggTorrentSettings", "enable": true, "protocol": "torrent", "priority": 1, "fields": [{{"name": "passkey", "value": "{}"}}]}}'"#, prowlarr_api, passkey);
+            ssh::execute_command(host, username, private_key, &prowlarr_ygg_cmd).await.ok();
+
+            // Ajouter FlareSolverr
+            let flaresolverr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/indexerProxy' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{"name": "FlareSolverr", "configContract": "FlareSolverrSettings", "implementation": "FlareSolverr", "fields": [{{"name": "host", "value": "http://localhost:8191"}}]}}'"#, prowlarr_api);
+            ssh::execute_command(host, username, private_key, &flaresolverr_cmd).await.ok();
+        }
+    }
+
+    // 8.6: Synchroniser Prowlarr avec Radarr/Sonarr
+    if !prowlarr_api.is_empty() {
+        emit_progress(&window, "config", 96, "Synchronisation Prowlarr...", None);
+
+        if !radarr_api.is_empty() {
+            let sync_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/applications' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{"name": "Radarr", "syncLevel": "fullSync", "implementation": "Radarr", "configContract": "RadarrSettings", "fields": [{{"name": "prowlarrUrl", "value": "http://localhost:9696"}}, {{"name": "baseUrl", "value": "http://localhost:7878"}}, {{"name": "apiKey", "value": "{}"}}]}}'"#, prowlarr_api, radarr_api);
+            ssh::execute_command(host, username, private_key, &sync_radarr_cmd).await.ok();
+        }
+
+        if !sonarr_api.is_empty() {
+            let sync_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/applications' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{"name": "Sonarr", "syncLevel": "fullSync", "implementation": "Sonarr", "configContract": "SonarrSettings", "fields": [{{"name": "prowlarrUrl", "value": "http://localhost:9696"}}, {{"name": "baseUrl", "value": "http://localhost:8989"}}, {{"name": "apiKey", "value": "{}"}}]}}'"#, prowlarr_api, sonarr_api);
+            ssh::execute_command(host, username, private_key, &sync_sonarr_cmd).await.ok();
+        }
+    }
+
+    // 8.7: Configurer Bazarr
+    emit_progress(&window, "config", 97, "Configuration Bazarr...", None);
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let mut bazarr_ready = false;
+    for _ in 0..12 {
+        let check = ssh::execute_command(host, username, private_key,
+            "test -f ~/media-stack/bazarr/config/config.yaml && echo OK || echo WAIT"
+        ).await.unwrap_or_default();
+        if check.contains("OK") {
+            bazarr_ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if bazarr_ready && !radarr_api.is_empty() && !sonarr_api.is_empty() {
+        let bazarr_api_check = ssh::execute_command(host, username, private_key,
+            "grep -oP '(?<=apikey: )[^\\s]+' ~/media-stack/bazarr/config/config.yaml 2>/dev/null || echo ''"
+        ).await.unwrap_or_default().trim().to_string();
+
+        if !bazarr_api_check.is_empty() {
+            let bazarr_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
+                -H 'X-API-KEY: {}' -H 'Content-Type: application/json' \
+                -d '{{"settings": {{"radarr": {{"ip": "localhost", "port": 7878, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, radarr_api);
+            ssh::execute_command(host, username, private_key, &bazarr_radarr_cmd).await.ok();
+
+            let bazarr_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
+                -H 'X-API-KEY: {}' -H 'Content-Type: application/json' \
+                -d '{{"settings": {{"sonarr": {{"ip": "localhost", "port": 8989, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, sonarr_api);
+            ssh::execute_command(host, username, private_key, &bazarr_sonarr_cmd).await.ok();
+            println!("[Config] Bazarr: Configured");
+        }
+    }
+
+    println!("[Config] Note: Jellyseerr requires manual first-time setup at http://<pi-ip>:5055");
+
+    ssh::execute_command(host, username, private_key,
+        "echo \"$(date): Service configuration completed\" >> ~/jellysetup-logs/install.log"
+    ).await.ok();
+
+    // 8.9: Sauvegarder l'installation dans Supabase (centralisation des identifiants)
+    emit_progress(&window, "supabase", 98, "Sauvegarde dans le cloud...", None);
+
+    // Récupérer le fingerprint SSH (capturé lors de la connexion)
+    let ssh_fingerprint = ssh::get_last_host_fingerprint();
+
+    // Sauvegarder dans Supabase (ne bloque pas en cas d'erreur)
+    // Note: Pour l'auth par clé, on pourrait aussi sauvegarder les clés SSH
+    // mais elles ne sont pas passées à cette fonction actuellement
+    match crate::supabase::save_installation(
+        hostname,
+        host,
+        None,  // TODO: Ajouter la clé publique à InstallConfig
+        None,  // TODO: Ajouter la clé privée chiffrée
+        ssh_fingerprint.as_deref(),
+        env!("CARGO_PKG_VERSION"),
+    ).await {
+        Ok(config_id) => {
+            println!("[Supabase] Installation saved with ID: {}", config_id);
+
+            // Sauvegarder aussi les credentials de l'utilisateur
+            if let Err(e) = crate::supabase::save_pi_config(
+                hostname,
+                &config_id,
+                Some(&config.alldebrid_api_key),
+                config.ygg_passkey.as_deref(),
+                config.cloudflare_token.as_deref(),
+                None,
+            ).await {
+                println!("[Supabase] Warning: could not save Pi config: {}", e);
+            }
+
+            // Mettre à jour le statut à "completed"
+            if let Err(e) = crate::supabase::update_status(hostname, &config_id, "completed", None).await {
+                println!("[Supabase] Warning: could not update status: {}", e);
+            }
+        }
+        Err(e) => {
+            println!("[Supabase] Warning: could not save installation: {}", e);
+        }
+    }
 
     emit_progress(&window, "complete", 100, "Installation terminée !", None);
 
@@ -1127,8 +1454,68 @@ pub async fn run_full_installation_password(
 ) -> Result<()> {
     use crate::ssh;
 
-    // Pour QuickConnect, on utilise le hostname du Pi tel quel
-    let hostname = host.replace(".local", "");
+    // Empêcher la mise en veille du Mac pendant l'installation
+    #[cfg(target_os = "macos")]
+    let caffeinate_process = {
+        match std::process::Command::new("caffeinate")
+            .args(["-dims"]) // display, idle, disk, system sleep prevention
+            .spawn()
+        {
+            Ok(child) => {
+                println!("[Install] caffeinate started (PID: {})", child.id());
+                Some(child)
+            }
+            Err(e) => {
+                println!("[Install] Warning: could not start caffeinate: {}", e);
+                None
+            }
+        }
+    };
+    #[cfg(not(target_os = "macos"))]
+    let caffeinate_process: Option<std::process::Child> = None;
+
+    // IMPORTANT: Nettoyer le known_hosts local pour cette IP
+    // Cela permet de gérer les reflash de carte SD sans erreur de clé SSH
+    if let Err(e) = ssh::clear_known_hosts_for_ip(host) {
+        println!("[Install] Warning: could not clear known_hosts: {}", e);
+    }
+
+    // Faire une première connexion SSH pour capturer le fingerprint du serveur
+    emit_progress(&window, "ssh_check", 0, "Vérification de la connexion SSH...", None);
+    match ssh::test_connection_password(host, username, password).await {
+        Ok(true) => {
+            // Récupérer le fingerprint capturé
+            if let Some(fp) = ssh::get_last_host_fingerprint() {
+                println!("[Install] SSH host fingerprint captured: {}", fp);
+                // Le fingerprint sera sauvegardé dans Supabase avec les autres données
+            }
+        }
+        Ok(false) => {
+            return Err(anyhow::anyhow!("Authentification SSH échouée"));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Connexion SSH impossible: {}", e));
+        }
+    }
+
+    // Récupérer le vrai hostname du Pi via SSH (important pour les connexions par IP)
+    let hostname = if host.contains(".local") {
+        // Si c'est déjà un hostname mDNS, on retire juste .local
+        host.replace(".local", "")
+    } else {
+        // Sinon on récupère le hostname via SSH
+        match ssh::execute_command_password(host, username, password, "hostname").await {
+            Ok(h) => {
+                let h = h.trim().to_string();
+                println!("[Install] Hostname récupéré via SSH: {}", h);
+                h
+            }
+            Err(e) => {
+                println!("[Install] Warning: impossible de récupérer hostname: {}, utilisation de l'IP", e);
+                host.to_string()
+            }
+        }
+    };
 
     // Générer le docker-compose.yml avec tous les services
     let docker_compose = generate_docker_compose(
@@ -1136,43 +1523,361 @@ pub async fn run_full_installation_password(
         config.cloudflare_token.as_deref()
     );
 
-    // Étape 1: Mise à jour système
-    emit_progress(&window, "update", 0, "Mise à jour système...", None);
+    // ==========================================================================
+    // MEGA SYSTÈME DE LOGS - Initialisation
+    // ==========================================================================
+    use crate::logging::{InstallationLogger, LogLevel};
+
+    let logger = InstallationLogger::new(
+        &hostname,           // pi_name (utilisé pour le schéma Supabase)
+        host,                // pi_ip
+        host,                // ssh_host
+        username,            // ssh_username
+        password,            // ssh_password
+        env!("CARGO_PKG_VERSION"), // installer_version
+    );
+
+    // Initialiser le logger (crée dossier local + schéma Supabase)
+    if let Err(e) = logger.initialize().await {
+        println!("[Install] ⚠️ Warning: logger init failed: {}", e);
+    }
+
+    logger.log_with_details(
+        LogLevel::Info,
+        "installation_start",
+        "Installation démarrée",
+        serde_json::json!({
+            "hostname": hostname,
+            "host": host,
+            "username": username,
+            "alldebrid_configured": !config.alldebrid_api_key.is_empty(),
+            "cloudflare_configured": config.cloudflare_token.is_some(),
+            "ygg_configured": config.ygg_passkey.is_some(),
+        })
+    ).await;
+
+    // Étape 1: Mise à jour système (en background pour éviter timeout)
+    logger.start_step("apt_update").await;
+    emit_progress(&window, "update", 0, "Mise à jour système (peut prendre 10-15 min)...", None);
+
+    // Lancer apt update/upgrade en background avec nohup
+    // IMPORTANT: DEBIAN_FRONTEND=noninteractive + --force-confdef/confold pour éviter les questions interactives
     let update_cmd = format!(
-        "echo '{}' | sudo -S apt update && echo '{}' | sudo -S apt upgrade -y && echo '{}' | sudo -S apt install -y git curl",
+        "nohup sh -c 'export DEBIAN_FRONTEND=noninteractive && echo \"{}\" | sudo -S -E apt update && echo \"{}\" | sudo -S -E apt upgrade -y -o Dpkg::Options::=\"--force-confdef\" -o Dpkg::Options::=\"--force-confold\" && echo \"{}\" | sudo -S -E apt install -y git curl && touch /tmp/apt_done' > /tmp/apt.log 2>&1 &",
         password, password, password
     );
-    ssh::execute_command_password(host, username, password, &update_cmd).await?;
+    ssh::execute_command_password(host, username, password, &update_cmd).await.ok();
 
-    // Étape 2: Installation Docker
-    emit_progress(&window, "docker", 15, "Installation Docker...", None);
-    let docker_cmd = format!(
-        "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && echo '{}' | sudo -S sh /tmp/get-docker.sh && echo '{}' | sudo -S usermod -aG docker $USER",
-        password, password
-    );
-    ssh::execute_command_password(host, username, password, &docker_cmd).await?;
+    // Attendre que apt soit terminé (max 15 min)
+    let mut apt_completed = false;
+    for i in 0..90 {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-    // Étape 3: Redémarrage pour appliquer groupe docker
-    emit_progress(&window, "reboot", 30, "Redémarrage...", None);
-    let reboot_cmd = format!("echo '{}' | sudo -S reboot", password);
-    ssh::execute_command_password(host, username, password, &reboot_cmd).await.ok();
-    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        // Vérifier si apt est terminé et récupérer le paquet en cours
+        let status_cmd = r#"
+            if [ -f /tmp/apt_done ]; then
+                echo 'DONE'
+            elif pgrep -f 'apt|dpkg' > /dev/null; then
+                # Déterminer la phase et récupérer l'info pertinente
+                if grep -q 'Unpacking\|Setting up' /tmp/apt.log 2>/dev/null; then
+                    # Phase upgrade: afficher le paquet
+                    PKG=$(grep -oE '(Unpacking|Setting up) [^ ]+' /tmp/apt.log 2>/dev/null | tail -1 | awk '{print $2}' | cut -d: -f1)
+                    echo "UPGRADE:${PKG:-installing}"
+                elif grep -q 'Reading package lists\|Building dependency' /tmp/apt.log 2>/dev/null; then
+                    echo "UPDATE:refresh"
+                elif grep -q 'Hit:\|Get:' /tmp/apt.log 2>/dev/null; then
+                    REPO=$(grep -oE '(Hit|Get):[0-9]+ [^ ]+' /tmp/apt.log 2>/dev/null | tail -1 | awk '{print $2}' | cut -d'/' -f3)
+                    echo "FETCH:${REPO:-repos}"
+                else
+                    echo "RUNNING:working"
+                fi
+            else
+                echo 'IDLE'
+            fi
+        "#;
+        match ssh::execute_command_password(host, username, password, status_cmd).await {
+            Ok(output) => {
+                let output = output.trim();
+                if output.contains("DONE") {
+                    println!("[Install] apt upgrade completed!");
+                    apt_completed = true;
+                    break;
+                } else if output.starts_with("UPGRADE:") {
+                    // Phase upgrade: afficher le paquet
+                    let pkg = output.strip_prefix("UPGRADE:").unwrap_or("...");
+                    let progress_msg = format!("Installation: {} • ~{}min", pkg, (15 - i / 6).max(1));
+                    emit_progress(&window, "update", (i as u32).min(14), &progress_msg, None);
+                } else if output.starts_with("UPDATE:") {
+                    let progress_msg = format!("Analyse des paquets... • ~{}min", (15 - i / 6).max(1));
+                    emit_progress(&window, "update", (i as u32).min(14), &progress_msg, None);
+                } else if output.starts_with("FETCH:") {
+                    let repo = output.strip_prefix("FETCH:").unwrap_or("repos");
+                    let progress_msg = format!("Téléchargement: {} • ~{}min", repo, (15 - i / 6).max(1));
+                    emit_progress(&window, "update", (i as u32).min(14), &progress_msg, None);
+                } else if output.starts_with("RUNNING:") {
+                    let progress_msg = format!("Mise à jour en cours... • ~{}min", (15 - i / 6).max(1));
+                    emit_progress(&window, "update", (i as u32).min(14), &progress_msg, None);
+                } else {
+                    // IDLE = apt pas en cours, mais pas forcément terminé (peut avoir rebooté)
+                    println!("[Install] apt not running, checking if completed...");
+                    // Ne pas break ici, continuer à vérifier
+                }
+            }
+            Err(_) => {
+                // Pi probablement en train de rebooter (kernel update)
+                println!("[Install] SSH lost, waiting for Pi...");
+                emit_progress(&window, "update", 10, "Pi redémarre (kernel update)...", None);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
-    // Attendre que le Pi soit de nouveau accessible
-    for i in 0..30 {
-        if ssh::execute_command_password(host, username, password, "echo ok").await.is_ok() {
-            break;
+                // Attendre que le Pi revienne
+                for _j in 0..30 {
+                    if ssh::execute_command_password(host, username, password, "echo ok").await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+                // Après reboot, continuer la boucle pour vérifier apt_done
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        if i == 29 {
-            return Err(anyhow!("Pi not responding after reboot"));
+
+        if i == 89 {
+            println!("[Install] Warning: apt timeout, continuing anyway");
         }
     }
 
-    // Étape 4: Création de la structure
+    // Si apt n'a pas terminé proprement (ex: reboot pendant upgrade), réparer et relancer
+    if !apt_completed {
+        println!("[Install] apt may have been interrupted, checking for broken packages...");
+        emit_progress(&window, "update", 12, "Vérification des paquets...", None);
+
+        // Réparer les paquets potentiellement cassés
+        let repair_cmd = format!(
+            "echo '{}' | sudo -S DEBIAN_FRONTEND=noninteractive dpkg --configure -a && echo '{}' | sudo -S DEBIAN_FRONTEND=noninteractive apt --fix-broken install -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'",
+            password, password
+        );
+        ssh::execute_command_password(host, username, password, &repair_cmd).await.ok();
+
+        // Vérifier si on doit relancer l'upgrade
+        let check_upgrade = ssh::execute_command_password(host, username, password,
+            "apt list --upgradable 2>/dev/null | grep -c upgradable || echo 0"
+        ).await.unwrap_or_default();
+
+        let upgradable_count: i32 = check_upgrade.trim().parse().unwrap_or(0);
+        if upgradable_count > 5 {
+            println!("[Install] {} packages still need upgrading, resuming...", upgradable_count);
+            emit_progress(&window, "update", 13, &format!("Reprise upgrade ({} paquets)...", upgradable_count), None);
+
+            let resume_cmd = format!(
+                "echo '{}' | sudo -S DEBIAN_FRONTEND=noninteractive apt upgrade -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold'",
+                password
+            );
+            ssh::execute_command_password(host, username, password, &resume_cmd).await.ok();
+        }
+    }
+
+    // Logger la fin de l'étape apt
+    logger.end_step("apt_update", apt_completed).await;
+    logger.log(LogLevel::Info, "apt_update", &format!(
+        "APT terminé: {}",
+        if apt_completed { "succès" } else { "avec récupération" }
+    )).await;
+
+    // IMPORTANT: Attendre que APT soit complètement libre avant Docker
+    // (évite "Could not get lock /var/lib/dpkg/lock-frontend")
+    emit_progress(&window, "docker", 14, "Attente fin des mises à jour...", None);
+    for wait_i in 0..60 {  // Max 5 minutes
+        let apt_free = ssh::execute_command_password(host, username, password,
+            "! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null && echo FREE || echo LOCKED"
+        ).await.unwrap_or_default();
+
+        if apt_free.contains("FREE") {
+            println!("[Install] APT is free, proceeding with Docker install");
+            break;
+        }
+        println!("[Install] APT still locked (attempt {}/60), waiting 5s...", wait_i + 1);
+        if wait_i % 6 == 0 {
+            emit_progress(&window, "docker", 14, &format!("APT verrouillé, attente... (~{}s)", (60 - wait_i) * 5), None);
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    // Étape 2: Installation Docker
+    logger.start_step("docker_install").await;
+    emit_progress(&window, "docker", 15, "Installation Docker...", None);
+
+    // Vérifier si Docker est déjà installé
+    let docker_check = ssh::execute_command_password(host, username, password, "docker --version 2>&1").await;
+    logger.log(LogLevel::Debug, "docker_install", &format!("Docker check: {:?}", docker_check)).await;
+
+    let docker_output = docker_check.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let docker_installed = docker_check.is_ok() && docker_output.contains("Docker");
+    println!("[Install] Docker installed: {}, output: '{}'", docker_installed, docker_output.trim());
+
+    if !docker_installed {
+        // Logger l'action
+        ssh::execute_command_password(host, username, password,
+            "echo \"$(date): Installing Docker...\" >> ~/jellysetup-logs/install.log"
+        ).await.ok();
+
+        let docker_cmd = format!(
+            "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && echo '{}' | sudo -S sh /tmp/get-docker.sh 2>&1 | tee -a ~/jellysetup-logs/docker-install.log && echo '{}' | sudo -S usermod -aG docker $USER",
+            password, password
+        );
+        match ssh::execute_command_password(host, username, password, &docker_cmd).await {
+            Ok(output) => {
+                println!("[Install] Docker install output: {}", &output[..output.len().min(500)]);
+                ssh::execute_command_password(host, username, password,
+                    "echo \"$(date): Docker install completed\" >> ~/jellysetup-logs/install.log"
+                ).await.ok();
+            }
+            Err(e) => {
+                let error_msg = format!("Docker install failed: {}", e);
+                println!("[Install] ERROR: {}", error_msg);
+                emit_progress(&window, "docker", 15, &format!("❌ Erreur: {}", e), None);
+                ssh::execute_command_password(host, username, password,
+                    &format!("echo \"$(date): ERROR - {}\" >> ~/jellysetup-logs/install.log", error_msg)
+                ).await.ok();
+                return Err(anyhow!(error_msg));
+            }
+        }
+    } else {
+        println!("[Install] Docker already installed, skipping");
+        ssh::execute_command_password(host, username, password,
+            "echo \"$(date): Docker already installed\" >> ~/jellysetup-logs/install.log"
+        ).await.ok();
+    }
+
+    // Étape 3: Redémarrage pour appliquer groupe docker
+    println!("[Install] ========== REBOOT ==========");
+    emit_progress(&window, "reboot", 30, "Redémarrage...", None);
+    ssh::execute_command_password(host, username, password,
+        "echo \"$(date): Rebooting to apply docker group...\" >> ~/jellysetup-logs/install.log"
+    ).await.ok();
+    let reboot_cmd = format!("echo '{}' | sudo -S reboot", password);
+    ssh::execute_command_password(host, username, password, &reboot_cmd).await.ok();
+    println!("[Install] Reboot command sent, waiting 45s...");
+    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+
+    // Attendre que le Pi soit de nouveau accessible
+    println!("[Install] Waiting for Pi to come back online...");
+    let mut pi_back = false;
+    for i in 0..30 {
+        match ssh::execute_command_password(host, username, password, "echo ok").await {
+            Ok(_) => {
+                println!("[Install] Pi is back online after {} attempts", i + 1);
+                pi_back = true;
+                break;
+            }
+            Err(e) => {
+                println!("[Install] Pi not yet responding (attempt {}/30): {}", i + 1, e);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+    if !pi_back {
+        return Err(anyhow!("Pi not responding after reboot (30 attempts)"));
+    }
+
+    // Vérifier que Docker est bien installé après le reboot
+    println!("[Install] Checking Docker after reboot...");
+    let docker_verify = ssh::execute_command_password(host, username, password, "docker --version 2>&1").await;
+    println!("[Install] Docker verify result: {:?}", docker_verify);
+
+    let docker_verify_output = docker_verify.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let docker_ok_after_reboot = docker_verify.is_ok() && docker_verify_output.contains("Docker");
+    println!("[Install] Docker OK after reboot: {}", docker_ok_after_reboot);
+
+    if !docker_ok_after_reboot {
+        // Docker pas installé, réessayer
+        println!("[Install] Docker not found after reboot, attempting 2nd installation...");
+        emit_progress(&window, "docker", 20, "Installation Docker (2ème tentative)...", None);
+        ssh::execute_command_password(host, username, password,
+            "echo \"$(date): Docker not found after reboot, retrying...\" >> ~/jellysetup-logs/install.log"
+        ).await.ok();
+
+        // IMPORTANT: Attendre que APT soit libre avant 2ème tentative
+        for wait_i in 0..60 {
+            let apt_free = ssh::execute_command_password(host, username, password,
+                "! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null && echo FREE || echo LOCKED"
+            ).await.unwrap_or_default();
+            if apt_free.contains("FREE") {
+                println!("[Install] APT is free for Docker retry");
+                break;
+            }
+            println!("[Install] APT still locked before Docker retry (attempt {}/60)", wait_i + 1);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
+        let docker_cmd = format!(
+            "curl -fsSL https://get.docker.com -o /tmp/get-docker.sh && echo '{}' | sudo -S sh /tmp/get-docker.sh 2>&1 | tee -a ~/jellysetup-logs/docker-install-retry.log && echo '{}' | sudo -S usermod -aG docker $USER",
+            password, password
+        );
+        ssh::execute_command_password(host, username, password, &docker_cmd).await?;
+
+        // Nouveau reboot après install Docker
+        let reboot_cmd = format!("echo '{}' | sudo -S reboot", password);
+        ssh::execute_command_password(host, username, password, &reboot_cmd).await.ok();
+        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+
+        // Attendre le Pi
+        for i in 0..30 {
+            if ssh::execute_command_password(host, username, password, "echo ok").await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            if i == 29 {
+                return Err(anyhow!("Pi not responding after Docker reboot"));
+            }
+        }
+    }
+
+    // VÉRIFICATION FINALE OBLIGATOIRE: Docker DOIT être installé avant de continuer
+    println!("[Install] ========== DOCKER FINAL VERIFICATION ==========");
+    emit_progress(&window, "docker", 35, "Vérification Docker...", None);
+    let final_docker_check = ssh::execute_command_password(host, username, password,
+        "docker --version 2>&1 && docker compose version 2>&1"
+    ).await;
+
+    println!("[Install] Final Docker check result: {:?}", final_docker_check);
+
+    match &final_docker_check {
+        Ok(output) if output.contains("Docker") && output.contains("Docker Compose") => {
+            println!("[Install] ✅ Docker et Docker Compose vérifiés: {}", output.lines().next().unwrap_or(""));
+            ssh::execute_command_password(host, username, password,
+                &format!("echo \"$(date): Docker verified - {}\" >> ~/jellysetup-logs/install.log",
+                    output.lines().next().unwrap_or("ok").replace('"', "'"))
+            ).await.ok();
+        }
+        Ok(output) => {
+            // Docker check returned but doesn't contain expected strings
+            println!("[Install] ❌ Docker check returned unexpected output: '{}'", output);
+            let error_msg = format!("❌ FATAL: Docker n'est pas installé correctement. Output: {}", output.chars().take(200).collect::<String>());
+            emit_progress(&window, "docker", 35, "❌ Docker non installé", None);
+            ssh::execute_command_password(host, username, password,
+                &format!("echo \"$(date): FATAL ERROR - Docker check failed: {}\" >> ~/jellysetup-logs/install.log",
+                    output.chars().take(100).collect::<String>().replace('"', "'"))
+            ).await.ok();
+            return Err(anyhow!(error_msg));
+        }
+        Err(e) => {
+            println!("[Install] ❌ Docker check failed with error: {}", e);
+            let error_msg = format!("❌ FATAL: Docker n'est pas installé. Erreur SSH: {}", e);
+            emit_progress(&window, "docker", 35, "❌ Docker non installé", None);
+            ssh::execute_command_password(host, username, password,
+                &format!("echo \"$(date): FATAL ERROR - Docker not installed, SSH error\" >> ~/jellysetup-logs/install.log")
+            ).await.ok();
+            return Err(anyhow!(error_msg));
+        }
+    }
+
+    println!("[Install] ========== DOCKER OK - CONTINUING ==========");
+
+    // Étape 4: Création de la structure (y compris les dossiers media)
     emit_progress(&window, "structure", 40, "Création structure...", None);
     let mkdir_cmd = format!(
-        "mkdir -p ~/media-stack/{{decypharr,jellyfin,radarr,sonarr,prowlarr,jellyseerr,bazarr,logs}} && echo '{}' | sudo -S mkdir -p /mnt/decypharr && echo '{}' | sudo -S chown $USER:$USER /mnt/decypharr",
+        "mkdir -p ~/media-stack/{{decypharr,jellyfin,radarr,sonarr,prowlarr,jellyseerr,bazarr,logs}} && \
+         echo '{}' | sudo -S mkdir -p /mnt/decypharr/{{movies,tv,qbit/downloads}} && \
+         echo '{}' | sudo -S chown -R $USER:$USER /mnt/decypharr",
         password, password
     );
     ssh::execute_command_password(host, username, password, &mkdir_cmd).await?;
@@ -1182,11 +1887,211 @@ pub async fn run_full_installation_password(
     let write_cmd = format!("cat > ~/media-stack/docker-compose.yml << 'EOFCOMPOSE'\n{}\nEOFCOMPOSE", docker_compose);
     ssh::execute_command_password(host, username, password, &write_cmd).await?;
 
-    // Étape 6: Démarrer les services
-    emit_progress(&window, "compose_up", 60, "Démarrage des services Docker...", None);
-    ssh::execute_command_password(host, username, password,
-        "cd ~/media-stack && docker compose pull && docker compose up -d"
-    ).await?;
+    // Étape 6: Démarrer les services (en background car pull peut être très long)
+    emit_progress(&window, "compose_up", 60, "Téléchargement des images Docker (peut prendre 10-20 min)...", None);
+
+    // Vérifier que Docker fonctionne avant de lancer le pull
+    let docker_test = ssh::execute_command_password(host, username, password, "docker ps").await;
+    if docker_test.is_err() {
+        let error_msg = "Docker n'est pas accessible - vérifiez l'installation";
+        emit_progress(&window, "compose_up", 60, &format!("❌ {}", error_msg), None);
+        ssh::execute_command_password(host, username, password,
+            &format!("echo \"$(date): ERROR - {}\" >> ~/jellysetup-logs/install.log", error_msg)
+        ).await.ok();
+        return Err(anyhow!(error_msg));
+    }
+
+    // Docker compose pull avec retry automatique en cas d'échec réseau
+    let mut pull_attempt = 0;
+    let max_pull_attempts = 3;
+
+    'pull_loop: loop {
+        pull_attempt += 1;
+        if pull_attempt > max_pull_attempts {
+            let error_msg = format!("Docker pull échoué après {} tentatives", max_pull_attempts);
+            emit_progress(&window, "compose_up", 60, &format!("❌ {}", error_msg), None);
+            return Err(anyhow!(error_msg));
+        }
+
+        // Logger et lancer docker compose pull
+        ssh::execute_command_password(host, username, password,
+            &format!("echo \"$(date): Starting docker compose pull (attempt {}/{})...\" >> ~/jellysetup-logs/install.log", pull_attempt, max_pull_attempts)
+        ).await.ok();
+
+        emit_progress(&window, "compose_up", 60, &format!("Téléchargement images (tentative {}/{})...", pull_attempt, max_pull_attempts), None);
+
+        // Lancer docker compose pull avec fichier marker de fin (évite le bug pgrep/nohup)
+        ssh::execute_command_password(host, username, password,
+            "rm -f /tmp/docker_pull_done /tmp/docker_pull_failed && cd ~/media-stack && (docker compose pull > ~/jellysetup-logs/docker_pull.log 2>&1 && touch /tmp/docker_pull_done || touch /tmp/docker_pull_failed) &"
+        ).await?;
+
+        // Attendre que le pull soit terminé (max 25 min par tentative)
+        for i in 0..150 {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+            // Vérifier via fichiers markers (plus fiable que pgrep)
+            match ssh::execute_command_password(host, username, password,
+                "if [ -f /tmp/docker_pull_done ]; then echo DONE; elif [ -f /tmp/docker_pull_failed ]; then echo FAILED; elif grep -qi 'failed\\|error\\|timeout' ~/jellysetup-logs/docker_pull.log 2>/dev/null; then echo FAILED; else echo RUNNING; fi"
+            ).await {
+                Ok(output) => {
+                    let output = output.trim();
+                    if output.contains("DONE") {
+                        println!("[Install] Docker pull marker found, verifying images...");
+
+                        // VÉRIFICATION CRITIQUE: S'assurer que TOUTES les images sont présentes
+                        let images_check = ssh::execute_command_password(host, username, password,
+                            "cd ~/media-stack && docker compose config --images 2>/dev/null | while read img; do docker image inspect \"$img\" >/dev/null 2>&1 && echo \"OK: $img\" || echo \"MISSING: $img\"; done"
+                        ).await.unwrap_or_default();
+
+                        if images_check.contains("MISSING") {
+                            println!("[Install] Some images are missing! Will retry pull...");
+                            ssh::execute_command_password(host, username, password,
+                                &format!("echo \"$(date): Docker pull incomplete, some images missing: {}\" >> ~/jellysetup-logs/install.log",
+                                    images_check.lines().filter(|l| l.contains("MISSING")).collect::<Vec<_>>().join(", "))
+                            ).await.ok();
+                            // Supprimer le marker pour forcer un retry
+                            ssh::execute_command_password(host, username, password,
+                                "rm -f /tmp/docker_pull_done"
+                            ).await.ok();
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            continue 'pull_loop;  // Réessayer
+                        }
+
+                        println!("[Install] All images verified successfully!");
+                        ssh::execute_command_password(host, username, password,
+                            "echo \"$(date): Docker pull completed and verified - all images present\" >> ~/jellysetup-logs/install.log"
+                        ).await.ok();
+                        break 'pull_loop;  // Succès, sortir de la boucle principale
+                    } else if output.contains("FAILED") {
+                        println!("[Install] Docker pull failed, will retry...");
+                        ssh::execute_command_password(host, username, password,
+                            "echo \"$(date): Docker pull FAILED - retrying...\" >> ~/jellysetup-logs/install.log"
+                        ).await.ok();
+                        // Attendre 10s avant de réessayer
+                        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        continue 'pull_loop;  // Réessayer
+                    }
+                    // RUNNING - afficher progression
+                    let progress = 60 + (i as u32 * 10 / 150).min(14);
+                    emit_progress(&window, "compose_up", progress,
+                        &format!("Téléchargement images... (~{}min)", (150 - i) / 6), None);
+                }
+                Err(_) => {
+                    println!("[Install] SSH check failed, retrying...");
+                }
+            }
+        }
+
+        // Timeout atteint sans succès ni échec détecté - considérer comme échec
+        println!("[Install] Docker pull timeout, will retry...");
+    }
+
+    // Lancer docker compose up - ÉTAPE CRITIQUE
+    logger.start_step("docker_compose_up").await;
+    emit_progress(&window, "compose_up", 74, "Démarrage des conteneurs...", None);
+
+    let compose_up_result = ssh::execute_command_password(host, username, password,
+        "cd ~/media-stack && docker compose up -d 2>&1"
+    ).await;
+
+    let compose_up_success = compose_up_result.is_ok();
+
+    match &compose_up_result {
+        Ok(output) => {
+            // Vérifier si la sortie contient des erreurs même si la commande SSH a réussi
+            let output_lower = output.to_lowercase();
+            let has_error = output_lower.contains("error") ||
+                           output_lower.contains("failed") ||
+                           output_lower.contains("cannot") ||
+                           output_lower.contains("permission denied");
+
+            if has_error {
+                logger.log_error(
+                    "docker_compose_up",
+                    "docker compose up -d a retourné des erreurs !",
+                    Some(serde_json::json!({
+                        "output": output.chars().take(1000).collect::<String>(),
+                        "command": "cd ~/media-stack && docker compose up -d",
+                        "error_detected": true
+                    }))
+                ).await;
+                return Err(anyhow::anyhow!("Docker compose up a échoué: {}", output.chars().take(500).collect::<String>()));
+            }
+
+            logger.log_with_details(
+                LogLevel::Success,
+                "docker_compose_up",
+                "docker compose up -d exécuté avec succès",
+                serde_json::json!({
+                    "output": output.chars().take(500).collect::<String>(),
+                    "command": "cd ~/media-stack && docker compose up -d"
+                })
+            ).await;
+        }
+        Err(e) => {
+            logger.log_error("docker_compose_up", &format!("docker compose up -d FAILED: {}", e), Some(serde_json::json!({
+                "error": e.to_string(),
+                "command": "cd ~/media-stack && docker compose up -d"
+            }))).await;
+            return Err(anyhow::anyhow!("Docker compose up a échoué: {}", e));
+        }
+    }
+
+    // VÉRIFICATION CRITIQUE: S'assurer que les containers tournent VRAIMENT
+    // Attendre un peu pour que les containers démarrent
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    let containers_check = ssh::execute_command_password(host, username, password,
+        "docker ps --format '{{.Names}}: {{.Status}}' 2>&1"
+    ).await.unwrap_or_default();
+
+    let container_count = ssh::execute_command_password(host, username, password,
+        "docker ps -q | wc -l"
+    ).await.unwrap_or_default().trim().parse::<i32>().unwrap_or(0);
+
+    logger.log_with_details(
+        LogLevel::Info,
+        "docker_compose_up",
+        &format!("État des conteneurs après démarrage: {} containers actifs", container_count),
+        serde_json::json!({
+            "containers": containers_check.trim(),
+            "container_count": container_count
+        })
+    ).await;
+
+    // VÉRIFICATION STRICTE: On attend 9 containers minimum (10 avec Cloudflare)
+    let expected_min_containers = 9; // decypharr, jellyfin, radarr, sonarr, prowlarr, jellyseerr, bazarr, flaresolverr, supabazarr
+
+    if container_count < expected_min_containers {
+        // Récupérer les logs docker compose pour debug
+        let compose_logs = ssh::execute_command_password(host, username, password,
+            "cd ~/media-stack && docker compose logs --tail=50 2>&1"
+        ).await.unwrap_or_default();
+
+        logger.log_error(
+            "docker_compose_up",
+            &format!("ERREUR CRITIQUE: Seulement {} containers sur {} attendus !", container_count, expected_min_containers),
+            Some(serde_json::json!({
+                "docker_ps_output": containers_check.trim(),
+                "expected_minimum": expected_min_containers,
+                "actual": container_count,
+                "compose_logs": compose_logs.chars().take(2000).collect::<String>()
+            }))
+        ).await;
+        logger.end_step("docker_compose_up", false).await;
+
+        // Lister les images manquantes pour aider au debug
+        let missing_images = ssh::execute_command_password(host, username, password,
+            "cd ~/media-stack && docker compose config --images 2>/dev/null"
+        ).await.unwrap_or_default();
+
+        return Err(anyhow::anyhow!(
+            "Docker compose up a échoué: seulement {} containers sur {} attendus. Images requises: {}",
+            container_count, expected_min_containers, missing_images.trim()
+        ));
+    }
+
+    logger.end_step("docker_compose_up", true).await;
 
     // Étape 7: Attendre que les services soient prêts
     emit_progress(&window, "wait_services", 75, "Attente des services...", None);
@@ -1195,7 +2100,488 @@ pub async fn run_full_installation_password(
     // Étape 8: Configuration des services via API
     emit_progress(&window, "config", 85, "Configuration des services...", None);
 
+    // 8.1: Attendre que Jellyfin soit prêt (max 2 min)
+    emit_progress(&window, "config", 86, "Attente de Jellyfin...", None);
+    let mut jellyfin_ready = false;
+    for i in 0..24 {
+        let check = ssh::execute_command_password(host, username, password,
+            "curl -s -o /dev/null -w '%{http_code}' http://localhost:8096/health 2>/dev/null || echo 000"
+        ).await.unwrap_or_default();
+        if check.trim() == "200" {
+            jellyfin_ready = true;
+            println!("[Config] Jellyfin is ready");
+            break;
+        }
+        println!("[Config] Waiting for Jellyfin ({}/24)...", i + 1);
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if jellyfin_ready {
+        // 8.2: Configurer Jellyfin via l'API Startup (compatible Jellyfin 10.11.x)
+        emit_progress(&window, "config", 87, "Configuration Jellyfin...", None);
+
+        // Échapper les caractères spéciaux pour JSON
+        let jf_user = config.jellyfin_username.replace("\\", "\\\\").replace("\"", "\\\"");
+        let jf_pass = config.jellyfin_password.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        // Étape 1: Initialiser l'utilisateur (GET /Startup/FirstUser créé l'utilisateur par défaut)
+        // En Jellyfin 10.11.x, il faut GET FirstUser avant de pouvoir POST User
+        let first_user_cmd = "curl -s 'http://localhost:8096/Startup/FirstUser'";
+        let first_user_result = ssh::execute_command_password(host, username, password, first_user_cmd).await.unwrap_or_default();
+        println!("[Config] Jellyfin FirstUser: {}", first_user_result);
+
+        // Petite pause pour laisser Jellyfin créer l'utilisateur
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        // Étape 2: Configuration initiale (langue, métadonnées)
+        let startup_config_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/Configuration' \
+            -H 'Content-Type: application/json' \
+            -d '{"UICulture":"fr","MetadataCountryCode":"FR","PreferredMetadataLanguage":"fr"}'"#;
+        ssh::execute_command_password(host, username, password, startup_config_cmd).await.ok();
+
+        // Étape 3: Mettre à jour l'utilisateur admin (POST /Startup/User)
+        let startup_user_cmd = format!(
+            r#"curl -s -X POST 'http://localhost:8096/Startup/User' \
+            -H 'Content-Type: application/json' \
+            -d '{{"Name":"{}","Password":"{}"}}'  "#,
+            jf_user, jf_pass
+        );
+        let user_result = ssh::execute_command_password(host, username, password, &startup_user_cmd).await;
+        match &user_result {
+            Ok(r) => println!("[Config] Jellyfin user updated: {}", r),
+            Err(e) => println!("[Config] Jellyfin user update warning: {}", e),
+        }
+
+        // Étape 4: Activer l'accès distant
+        let remote_access_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/RemoteAccess' \
+            -H 'Content-Type: application/json' \
+            -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}'"#;
+        ssh::execute_command_password(host, username, password, remote_access_cmd).await.ok();
+
+        // Étape 5: Compléter le wizard
+        let complete_cmd = "curl -s -X POST 'http://localhost:8096/Startup/Complete'";
+        ssh::execute_command_password(host, username, password, complete_cmd).await.ok();
+        println!("[Config] Jellyfin setup wizard completed");
+
+        // Étape 5: S'authentifier pour obtenir un token et créer les bibliothèques
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        let auth_cmd = format!(r#"curl -s -X POST 'http://localhost:8096/Users/AuthenticateByName' \
+            -H 'Content-Type: application/json' \
+            -H 'X-Emby-Authorization: MediaBrowser Client="JellySetup", Device="RaspberryPi", DeviceId="jellysetup-install", Version="1.0.0"' \
+            -d '{{"Username":"{}","Pw":"{}"}}'"#, jf_user, jf_pass);
+        let auth_result = ssh::execute_command_password(host, username, password, &auth_cmd).await.unwrap_or_default();
+
+        // Extraire le token de la réponse JSON
+        if let Some(token_start) = auth_result.find("\"AccessToken\":\"") {
+            let token_rest = &auth_result[token_start + 15..];
+            if let Some(token_end) = token_rest.find("\"") {
+                let jellyfin_token = &token_rest[..token_end];
+                println!("[Config] Jellyfin authenticated, creating libraries...");
+
+                // Créer la bibliothèque Films (format simplifié avec paths= dans l'URL)
+                let movies_lib_cmd = format!(
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&paths=/mnt/decypharr/movies&refreshLibrary=false' -H 'X-Emby-Token: {}'",
+                    jellyfin_token
+                );
+                ssh::execute_command_password(host, username, password, &movies_lib_cmd).await.ok();
+                println!("[Config] Jellyfin: Movies library created");
+
+                // Créer la bibliothèque Séries
+                let tv_lib_cmd = format!(
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Series&collectionType=tvshows&paths=/mnt/decypharr/tv&refreshLibrary=false' -H 'X-Emby-Token: {}'",
+                    jellyfin_token
+                );
+                ssh::execute_command_password(host, username, password, &tv_lib_cmd).await.ok();
+                println!("[Config] Jellyfin: TV Shows library created");
+
+                // Configurer Jellyfin en Français - Configuration serveur
+                let server_lang_cmd = format!(
+                    r#"curl -s -X POST 'http://localhost:8096/System/Configuration' \
+                       -H 'X-Emby-Token: {}' \
+                       -H 'Content-Type: application/json' \
+                       -d '{{"UICulture":"fr","PreferredMetadataLanguage":"fr","MetadataCountryCode":"FR"}}'"#,
+                    jellyfin_token
+                );
+                ssh::execute_command_password(host, username, password, &server_lang_cmd).await.ok();
+                println!("[Config] Jellyfin: Server configured in French");
+
+                // Récupérer l'ID utilisateur et configurer ses préférences en Français
+                let user_info_cmd = format!(
+                    "curl -s 'http://localhost:8096/Users/Me' -H 'X-Emby-Token: {}'",
+                    jellyfin_token
+                );
+                if let Ok(user_info) = ssh::execute_command_password(host, username, password, &user_info_cmd).await {
+                    if let Some(id_start) = user_info.find("\"Id\":\"") {
+                        let id_rest = &user_info[id_start + 6..];
+                        if let Some(id_end) = id_rest.find("\"") {
+                            let user_id = &id_rest[..id_end];
+                            // Mettre à jour les préférences utilisateur en Français
+                            let user_config_cmd = format!(
+                                r#"curl -s -X POST 'http://localhost:8096/Users/{}/Configuration' \
+                                   -H 'X-Emby-Token: {}' \
+                                   -H 'Content-Type: application/json' \
+                                   -d '{{"SubtitleLanguagePreference":"fre","AudioLanguagePreference":"fra"}}'"#,
+                                user_id, jellyfin_token
+                            );
+                            ssh::execute_command_password(host, username, password, &user_config_cmd).await.ok();
+                            println!("[Config] Jellyfin: User preferences set to French");
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // ERREUR CRITIQUE: Si Jellyfin n'est pas prêt après 2 min, c'est que l'installation a échoué !
+        logger.log_error(
+            "jellyfin_config",
+            "ERREUR CRITIQUE: Jellyfin n'est pas accessible après 2 minutes d'attente !",
+            Some(serde_json::json!({
+                "timeout_seconds": 120,
+                "attempts": 24,
+                "expected_url": "http://localhost:8096/health",
+                "expected_response": "200"
+            }))
+        ).await;
+
+        // Vérifier les logs Docker pour comprendre le problème
+        let docker_logs = ssh::execute_command_password(host, username, password,
+            "docker logs jellyfin 2>&1 | tail -50"
+        ).await.unwrap_or_default();
+
+        logger.log_with_details(
+            LogLevel::Error,
+            "jellyfin_config",
+            "Logs Jellyfin pour debug",
+            serde_json::json!({
+                "docker_logs": docker_logs.chars().take(2000).collect::<String>()
+            })
+        ).await;
+
+        return Err(anyhow::anyhow!("Jellyfin n'est pas accessible après 2 minutes d'attente. Les containers Docker ne fonctionnent pas correctement."));
+    }
+
+    // 8.3: Configurer Decypharr avec AllDebrid
+    emit_progress(&window, "config", 89, "Configuration Decypharr...", None);
+    if !config.alldebrid_api_key.is_empty() {
+        let ad_key = config.alldebrid_api_key.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        // Créer le config.json pour Decypharr
+        let decypharr_config = format!(r#"{{
+  "qbit": {{
+    "port": 8282,
+    "username": "",
+    "password": "",
+    "download_folder": "/mnt/decypharr/qbit/downloads",
+    "categories": {{
+      "radarr": "/mnt/decypharr/movies",
+      "sonarr": "/mnt/decypharr/tv"
+    }}
+  }},
+  "debrids": [
+    {{
+      "name": "alldebrid",
+      "enabled": true,
+      "api_key": "{}",
+      "folder": "/mnt/decypharr/alldebrid",
+      "download_uncached": true
+    }}
+  ],
+  "repair": {{
+    "enabled": true,
+    "interval": "1h"
+  }}
+}}"#, ad_key);
+
+        let write_config_cmd = format!(
+            "cat > ~/media-stack/decypharr/config.json << 'EOFDECYPHARR'\n{}\nEOFDECYPHARR",
+            decypharr_config
+        );
+        ssh::execute_command_password(host, username, password, &write_config_cmd).await.ok();
+
+        // Redémarrer Decypharr pour prendre en compte la config
+        ssh::execute_command_password(host, username, password,
+            "docker restart decypharr"
+        ).await.ok();
+        println!("[Config] Decypharr configured with AllDebrid");
+    }
+
+    // 8.4: Attendre que Radarr et Sonarr soient prêts
+    emit_progress(&window, "config", 91, "Configuration Radarr/Sonarr...", None);
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    // Récupérer les API keys de Radarr et Sonarr depuis leurs config.xml
+    let radarr_api = ssh::execute_command_password(host, username, password,
+        "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/radarr/config.xml 2>/dev/null || echo ''"
+    ).await.unwrap_or_default().trim().to_string();
+
+    let sonarr_api = ssh::execute_command_password(host, username, password,
+        "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/sonarr/config.xml 2>/dev/null || echo ''"
+    ).await.unwrap_or_default().trim().to_string();
+
+    let prowlarr_api = ssh::execute_command_password(host, username, password,
+        "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/prowlarr/config.xml 2>/dev/null || echo ''"
+    ).await.unwrap_or_default().trim().to_string();
+
+    println!("[Config] API Keys - Radarr: {}..., Sonarr: {}..., Prowlarr: {}...",
+        radarr_api.chars().take(8).collect::<String>(),
+        sonarr_api.chars().take(8).collect::<String>(),
+        prowlarr_api.chars().take(8).collect::<String>()
+    );
+
+    // Ajouter Decypharr comme client de téléchargement à Radarr
+    if !radarr_api.is_empty() {
+        let radarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/downloadclient' \
+            -H 'X-Api-Key: {}' \
+            -H 'Content-Type: application/json' \
+            -d '{{
+                "name": "Decypharr",
+                "implementation": "QBittorrent",
+                "configContract": "QBittorrentSettings",
+                "enable": true,
+                "priority": 1,
+                "fields": [
+                    {{"name": "host", "value": "localhost"}},
+                    {{"name": "port", "value": 8282}},
+                    {{"name": "useSsl", "value": false}},
+                    {{"name": "movieCategory", "value": "radarr"}}
+                ]
+            }}'"#, radarr_api);
+        ssh::execute_command_password(host, username, password, &radarr_client_cmd).await.ok();
+        println!("[Config] Radarr: Decypharr download client added");
+    }
+
+    // Ajouter Decypharr comme client de téléchargement à Sonarr
+    if !sonarr_api.is_empty() {
+        let sonarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/downloadclient' \
+            -H 'X-Api-Key: {}' \
+            -H 'Content-Type: application/json' \
+            -d '{{
+                "name": "Decypharr",
+                "implementation": "QBittorrent",
+                "configContract": "QBittorrentSettings",
+                "enable": true,
+                "priority": 1,
+                "fields": [
+                    {{"name": "host", "value": "localhost"}},
+                    {{"name": "port", "value": 8282}},
+                    {{"name": "useSsl", "value": false}},
+                    {{"name": "tvCategory", "value": "sonarr"}}
+                ]
+            }}'"#, sonarr_api);
+        ssh::execute_command_password(host, username, password, &sonarr_client_cmd).await.ok();
+        println!("[Config] Sonarr: Decypharr download client added");
+    }
+
+    // 8.4b: Ajouter les Root Folders pour Radarr et Sonarr
+    if !radarr_api.is_empty() {
+        let radarr_root_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/rootfolder' \
+            -H 'X-Api-Key: {}' \
+            -H 'Content-Type: application/json' \
+            -d '{{"path": "/mnt/decypharr/movies"}}'"#, radarr_api);
+        ssh::execute_command_password(host, username, password, &radarr_root_cmd).await.ok();
+        println!("[Config] Radarr: Root folder /mnt/decypharr/movies added");
+    }
+
+    if !sonarr_api.is_empty() {
+        let sonarr_root_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/rootfolder' \
+            -H 'X-Api-Key: {}' \
+            -H 'Content-Type: application/json' \
+            -d '{{"path": "/mnt/decypharr/tv"}}'"#, sonarr_api);
+        ssh::execute_command_password(host, username, password, &sonarr_root_cmd).await.ok();
+        println!("[Config] Sonarr: Root folder /mnt/decypharr/tv added");
+    }
+
+    // 8.5: Configurer Prowlarr avec YGG (si passkey fournie)
+    emit_progress(&window, "config", 94, "Configuration Prowlarr...", None);
+    if let Some(ref ygg_passkey) = config.ygg_passkey {
+        if !ygg_passkey.is_empty() && !prowlarr_api.is_empty() {
+            let passkey = ygg_passkey.replace("\\", "\\\\").replace("\"", "\\\"");
+
+            // D'abord, récupérer le schema de l'indexer YGG
+            // Puis ajouter l'indexer avec le passkey
+            let prowlarr_ygg_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/indexer' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{
+                    "name": "YGGTorrent",
+                    "definitionName": "yggtorrent",
+                    "implementation": "YggTorrent",
+                    "configContract": "YggTorrentSettings",
+                    "enable": true,
+                    "protocol": "torrent",
+                    "priority": 1,
+                    "fields": [
+                        {{"name": "passkey", "value": "{}"}}
+                    ]
+                }}'"#, prowlarr_api, passkey);
+            ssh::execute_command_password(host, username, password, &prowlarr_ygg_cmd).await.ok();
+            println!("[Config] Prowlarr: YGG indexer configured");
+
+            // Ajouter FlareSolverr à Prowlarr
+            let flaresolverr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/indexerProxy' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{
+                    "name": "FlareSolverr",
+                    "configContract": "FlareSolverrSettings",
+                    "implementation": "FlareSolverr",
+                    "fields": [
+                        {{"name": "host", "value": "http://localhost:8191"}}
+                    ]
+                }}'"#, prowlarr_api);
+            ssh::execute_command_password(host, username, password, &flaresolverr_cmd).await.ok();
+        }
+    }
+
+    // 8.6: Synchroniser Prowlarr avec Radarr et Sonarr
+    if !prowlarr_api.is_empty() {
+        emit_progress(&window, "config", 96, "Synchronisation Prowlarr...", None);
+
+        // Ajouter Radarr comme application dans Prowlarr
+        if !radarr_api.is_empty() {
+            let sync_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/applications' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{
+                    "name": "Radarr",
+                    "syncLevel": "fullSync",
+                    "implementation": "Radarr",
+                    "configContract": "RadarrSettings",
+                    "fields": [
+                        {{"name": "prowlarrUrl", "value": "http://localhost:9696"}},
+                        {{"name": "baseUrl", "value": "http://localhost:7878"}},
+                        {{"name": "apiKey", "value": "{}"}}
+                    ]
+                }}'"#, prowlarr_api, radarr_api);
+            ssh::execute_command_password(host, username, password, &sync_radarr_cmd).await.ok();
+            println!("[Config] Prowlarr: Radarr sync configured");
+        }
+
+        // Ajouter Sonarr comme application dans Prowlarr
+        if !sonarr_api.is_empty() {
+            let sync_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/applications' \
+                -H 'X-Api-Key: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{
+                    "name": "Sonarr",
+                    "syncLevel": "fullSync",
+                    "implementation": "Sonarr",
+                    "configContract": "SonarrSettings",
+                    "fields": [
+                        {{"name": "prowlarrUrl", "value": "http://localhost:9696"}},
+                        {{"name": "baseUrl", "value": "http://localhost:8989"}},
+                        {{"name": "apiKey", "value": "{}"}}
+                    ]
+                }}'"#, prowlarr_api, sonarr_api);
+            ssh::execute_command_password(host, username, password, &sync_sonarr_cmd).await.ok();
+            println!("[Config] Prowlarr: Sonarr sync configured");
+        }
+    }
+
+    // 8.7: Configurer Bazarr avec Radarr et Sonarr
+    emit_progress(&window, "config", 97, "Configuration Bazarr...", None);
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // Attendre que Bazarr génère son config.ini
+    let mut bazarr_ready = false;
+    for _ in 0..12 {
+        let check = ssh::execute_command_password(host, username, password,
+            "test -f ~/media-stack/bazarr/config/config.yaml && echo OK || echo WAIT"
+        ).await.unwrap_or_default();
+        if check.contains("OK") {
+            bazarr_ready = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if bazarr_ready && !radarr_api.is_empty() && !sonarr_api.is_empty() {
+        // Bazarr utilise config.yaml depuis les versions récentes
+        // On peut modifier directement les settings via son API après le premier démarrage
+        let bazarr_api_check = ssh::execute_command_password(host, username, password,
+            "grep -oP '(?<=apikey: )[^\\s]+' ~/media-stack/bazarr/config/config.yaml 2>/dev/null || echo ''"
+        ).await.unwrap_or_default().trim().to_string();
+
+        if !bazarr_api_check.is_empty() {
+            // Configurer Radarr dans Bazarr
+            let bazarr_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
+                -H 'X-API-KEY: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{"settings": {{"radarr": {{"ip": "localhost", "port": 7878, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, radarr_api);
+            ssh::execute_command_password(host, username, password, &bazarr_radarr_cmd).await.ok();
+
+            // Configurer Sonarr dans Bazarr
+            let bazarr_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
+                -H 'X-API-KEY: {}' \
+                -H 'Content-Type: application/json' \
+                -d '{{"settings": {{"sonarr": {{"ip": "localhost", "port": 8989, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, sonarr_api);
+            ssh::execute_command_password(host, username, password, &bazarr_sonarr_cmd).await.ok();
+            println!("[Config] Bazarr: Radarr and Sonarr configured");
+        }
+    }
+
+    // 8.8: Note pour Jellyseerr - nécessite config manuelle au premier lancement
+    println!("[Config] Note: Jellyseerr requires manual first-time setup at http://<pi-ip>:5055");
+
+    // Log la configuration effectuée
+    ssh::execute_command_password(host, username, password,
+        "echo \"$(date): Service configuration completed\" >> ~/jellysetup-logs/install.log"
+    ).await.ok();
+
+    // 8.9: Sauvegarder l'installation dans Supabase (centralisation des identifiants)
+    emit_progress(&window, "supabase", 98, "Sauvegarde dans le cloud...", None);
+
+    // Récupérer le fingerprint SSH capturé au début
+    let ssh_fingerprint = ssh::get_last_host_fingerprint();
+
+    // Sauvegarder dans Supabase (ne bloque pas en cas d'erreur)
+    match crate::supabase::save_installation(
+        &hostname,
+        host,
+        None,  // Pas de clé publique pour auth par mot de passe
+        None,  // Pas de clé privée pour auth par mot de passe
+        ssh_fingerprint.as_deref(),
+        env!("CARGO_PKG_VERSION"),
+    ).await {
+        Ok(config_id) => {
+            println!("[Supabase] Installation saved with ID: {}", config_id);
+
+            // Sauvegarder aussi les credentials de l'utilisateur
+            if let Err(e) = crate::supabase::save_pi_config(
+                &hostname,
+                &config_id,
+                Some(&config.alldebrid_api_key),
+                config.ygg_passkey.as_deref(),
+                config.cloudflare_token.as_deref(),
+                None,
+            ).await {
+                println!("[Supabase] Warning: could not save Pi config: {}", e);
+            }
+
+            // Mettre à jour le statut à "completed"
+            if let Err(e) = crate::supabase::update_status(&hostname, &config_id, "completed", None).await {
+                println!("[Supabase] Warning: could not update status: {}", e);
+            }
+        }
+        Err(e) => {
+            println!("[Supabase] Warning: could not save installation: {}", e);
+        }
+    }
+
     emit_progress(&window, "complete", 100, "Installation terminée !", None);
+
+    // Finaliser les logs et envoyer tout à Supabase
+    logger.finalize(true).await;
+
+    // Arrêter caffeinate maintenant que l'installation est terminée
+    #[cfg(target_os = "macos")]
+    if let Some(mut process) = caffeinate_process {
+        println!("[Install] Stopping caffeinate...");
+        let _ = process.kill();
+    }
 
     tracing::info!("Installation (password auth) completed successfully on {}", host);
     Ok(())

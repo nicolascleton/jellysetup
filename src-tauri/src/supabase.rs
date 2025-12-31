@@ -33,6 +33,12 @@ pub fn get_supabase_url_public() -> String {
     get_supabase_url()
 }
 
+/// Get ANON key (public, safe for client-side use)
+/// SÉCURITÉ: Cette clé est publique et peut être exposée dans l'app
+pub fn get_supabase_anon_key() -> String {
+    get_supabase_key()
+}
+
 /// Convertit le nom du Pi en nom de schéma PostgreSQL valide
 fn pi_name_to_schema(pi_name: &str) -> String {
     pi_name.to_lowercase()
@@ -48,12 +54,14 @@ struct ConfigRow {
     local_ip: Option<String>,
     ssh_public_key: Option<String>,
     ssh_private_key_encrypted: Option<String>,
+    ssh_host_fingerprint: Option<String>,  // Fingerprint du serveur SSH du Pi
     status: Option<String>,
     installer_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct InitResponse {
+    #[serde(default)]
     success: bool,
     message: Option<String>,
     schema: Option<String>,
@@ -85,18 +93,34 @@ pub async fn ensure_schema_initialized(pi_name: &str) -> Result<String> {
         .header("Content-Type", "application/json")
         .json(&json!({ "pi_name": pi_name }))
         .send()
-        .await?;
+        .await;
 
-    let result: InitResponse = response.json().await?;
+    // Gérer les erreurs Supabase sans bloquer l'installation
+    let result = match response {
+        Ok(resp) => {
+            match resp.json::<InitResponse>().await {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    println!("[Supabase] Warning: could not parse response: {}", e);
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            println!("[Supabase] Warning: request failed: {}", e);
+            None
+        }
+    };
 
-    if result.success {
+    if result.as_ref().map(|r| r.success).unwrap_or(false) {
         println!("[Supabase] Schema '{}' initialized: {:?}",
-                 result.schema.clone().unwrap_or_default(), result.tables);
+                 result.as_ref().and_then(|r| r.schema.clone()).unwrap_or_default(),
+                 result.as_ref().and_then(|r| r.tables.clone()));
         let mut schemas = INITIALIZED_SCHEMAS.lock().unwrap();
         schemas.insert(schema_name.clone());
         Ok(schema_name)
     } else {
-        println!("[Supabase] Schema init warning: {:?}", result.error);
+        println!("[Supabase] Schema init warning: {:?}", result.as_ref().and_then(|r| r.error.clone()));
         // On continue quand même, le schéma existe peut-être déjà
         let mut schemas = INITIALIZED_SCHEMAS.lock().unwrap();
         schemas.insert(schema_name.clone());
@@ -105,11 +129,13 @@ pub async fn ensure_schema_initialized(pi_name: &str) -> Result<String> {
 }
 
 /// Sauvegarde une installation dans le schéma dédié au Pi
+/// Note: ssh_public_key et ssh_private_key_encrypted sont optionnels pour les installations par mot de passe
 pub async fn save_installation(
     pi_name: &str,
     pi_ip: &str,
-    ssh_public_key: &str,
-    ssh_private_key_encrypted: &str,
+    ssh_public_key: Option<&str>,
+    ssh_private_key_encrypted: Option<&str>,
+    ssh_host_fingerprint: Option<&str>,
     installer_version: &str,
 ) -> Result<String> {
     // S'assurer que le schéma existe et récupérer son nom
@@ -123,15 +149,27 @@ pub async fn save_installation(
     let existing = check_existing_config(&schema_name).await?;
 
     if let Some(id) = existing {
-        // Mettre à jour la config existante
-        let body = json!({
+        // Mettre à jour la config existante (reflash de carte SD = nouveau fingerprint)
+        let mut body = json!({
             "local_ip": pi_ip,
-            "ssh_public_key": ssh_public_key,
-            "ssh_private_key_encrypted": ssh_private_key_encrypted,
             "status": "updating",
             "installer_version": installer_version,
             "last_seen": chrono::Utc::now().to_rfc3339()
         });
+
+        // Ajouter les clés SSH si fournies (auth par clé)
+        if let Some(pub_key) = ssh_public_key {
+            body["ssh_public_key"] = json!(pub_key);
+        }
+        if let Some(priv_key) = ssh_private_key_encrypted {
+            body["ssh_private_key_encrypted"] = json!(priv_key);
+        }
+
+        // Toujours mettre à jour le fingerprint si fourni (important lors d'un reflash)
+        if let Some(fp) = ssh_host_fingerprint {
+            body["ssh_host_fingerprint"] = json!(fp);
+            println!("[Supabase] Updating host fingerprint (SD card reflash detected)");
+        }
 
         client
             .patch(format!(
@@ -151,13 +189,22 @@ pub async fn save_installation(
     }
 
     // Mettre à jour la config créée automatiquement par l'init
-    let body = json!({
+    let mut body = json!({
         "local_ip": pi_ip,
-        "ssh_public_key": ssh_public_key,
-        "ssh_private_key_encrypted": ssh_private_key_encrypted,
         "status": "pending",
         "installer_version": installer_version
     });
+
+    // Ajouter les clés SSH si fournies (auth par clé)
+    if let Some(pub_key) = ssh_public_key {
+        body["ssh_public_key"] = json!(pub_key);
+    }
+    if let Some(priv_key) = ssh_private_key_encrypted {
+        body["ssh_private_key_encrypted"] = json!(priv_key);
+    }
+    if let Some(fp) = ssh_host_fingerprint {
+        body["ssh_host_fingerprint"] = json!(fp);
+    }
 
     // Récupérer l'ID de la config existante (créée par l'init)
     let response = client
@@ -166,9 +213,16 @@ pub async fn save_installation(
         .header("Authorization", format!("Bearer {}", service_key))
         .header("Accept-Profile", &schema_name)
         .send()
-        .await?;
+        .await;
 
-    let configs: Vec<ConfigRow> = response.json().await?;
+    // Gérer les erreurs Supabase sans bloquer
+    let configs: Vec<ConfigRow> = match response {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(e) => {
+            println!("[Supabase] Warning: could not fetch config: {}", e);
+            vec![]
+        }
+    };
 
     if let Some(config) = configs.first() {
         if let Some(id) = &config.id {
@@ -207,12 +261,13 @@ pub async fn save_installation(
     let text = response.text().await?;
 
     if !status.is_success() {
-        println!("[Supabase] Error creating config: {} - {}", status, text);
-        return Err(anyhow::anyhow!("Failed to create config: {}", text));
+        println!("[Supabase] Warning creating config: {} - {}", status, text);
+        // Ne pas bloquer l'installation pour une erreur Supabase
+        return Ok("local".to_string());
     }
 
-    let result: Vec<ConfigRow> = serde_json::from_str(&text)?;
-    let id = result.first().and_then(|i| i.id.clone()).unwrap_or_default();
+    let result: Vec<ConfigRow> = serde_json::from_str(&text).unwrap_or_default();
+    let id = result.first().and_then(|i| i.id.clone()).unwrap_or_else(|| "local".to_string());
 
     println!("[Supabase] Created config in schema '{}': {}", schema_name, id);
     Ok(id)
@@ -300,9 +355,22 @@ async fn check_existing_config(schema_name: &str) -> Result<Option<String>> {
         .send()
         .await?;
 
-    let results: Vec<ConfigRow> = response.json().await?;
+    let status = response.status();
+    let text = response.text().await?;
 
-    Ok(results.first().and_then(|i| i.id.clone()))
+    if !status.is_success() {
+        println!("[Supabase] check_existing_config error ({}): {}", status, text);
+        return Ok(None);
+    }
+
+    // Parse as array - handle both empty array and actual results
+    match serde_json::from_str::<Vec<ConfigRow>>(&text) {
+        Ok(results) => Ok(results.first().and_then(|i| i.id.clone())),
+        Err(e) => {
+            println!("[Supabase] check_existing_config parse error: {} - response: {}", e, text);
+            Ok(None)
+        }
+    }
 }
 
 /// Sauvegarde la configuration du Pi (credentials, services, etc.)
