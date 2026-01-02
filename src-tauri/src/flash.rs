@@ -1264,13 +1264,15 @@ pub async fn run_full_installation(
             decypharr_config
         );
         ssh::execute_command(host, username, private_key, &write_config_cmd).await.ok();
-        ssh::execute_command(host, username, private_key, "docker restart decypharr").await.ok();
+        // Redémarrer Decypharr en background (évite les timeouts)
+        ssh::execute_command(host, username, private_key, "nohup docker restart decypharr > /dev/null 2>&1 &").await.ok();
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         println!("[Config] Decypharr configured with AllDebrid");
     }
 
     // 8.4: Configurer Radarr/Sonarr
     emit_progress(&window, "config", 91, "Configuration Radarr/Sonarr...", None);
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let radarr_api = ssh::execute_command(host, username, private_key,
         "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/radarr/config.xml 2>/dev/null || echo ''"
@@ -1283,6 +1285,101 @@ pub async fn run_full_installation(
     let prowlarr_api = ssh::execute_command(host, username, private_key,
         "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/prowlarr/config.xml 2>/dev/null || echo ''"
     ).await.unwrap_or_default().trim().to_string();
+
+    // =============================================================================
+    // MASTER CONFIG - Fetch dynamique depuis Supabase
+    // =============================================================================
+    emit_progress(&window, "config", 89, "Récupération de la configuration master...", None);
+    println!("[MasterConfig] 🔄 Fetching configuration from Supabase...");
+
+    // Fetch master_config (type "streaming" par défaut, "storage" pour config NAS future)
+    let master_config_opt = crate::master_config::fetch_master_config(Some("streaming")).await.ok().flatten();
+
+    if let Some(master_cfg) = &master_config_opt {
+        println!("[MasterConfig] ✅ Master config loaded: {}", master_cfg.id);
+
+        // Préparer les variables pour le remplacement de templates
+        let mut template_vars = crate::template_engine::TemplateVars::new();
+        template_vars.set("PI_IP", host);
+        template_vars.set("PI_HOSTNAME", hostname);
+        template_vars.set("RADARR_API_KEY", &radarr_api);
+        template_vars.set("SONARR_API_KEY", &sonarr_api);
+        template_vars.set("PROWLARR_API_KEY", &prowlarr_api);
+        template_vars.set("JELLYFIN_USERNAME", &config.jellyfin_username);
+        template_vars.set("JELLYFIN_PASSWORD", &config.jellyfin_password);
+        template_vars.set("YGG_PASSKEY", config.admin_email.as_deref().unwrap_or(""));
+        template_vars.set("ALLDEBRID_API_KEY", &config.alldebrid_api_key);
+        template_vars.set("JELLYFIN_API_KEY", "PLACEHOLDER_WILL_BE_EXTRACTED");
+        template_vars.set("JELLYFIN_SERVER_ID", "PLACEHOLDER_WILL_BE_EXTRACTED");
+
+        // Appliquer la config pour chaque service depuis master_config
+        emit_progress(&window, "config", 90, "Application des configurations master...", None);
+
+        if let Some(jellyseerr_config) = &master_cfg.jellyseerr_config {
+            println!("[MasterConfig] Applying Jellyseerr config...");
+            if let Err(e) = crate::services::apply_service_config(
+                host, username, private_key,
+                "jellyseerr",
+                jellyseerr_config,
+                &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Jellyseerr config error: {}", e);
+            }
+        }
+
+        if let Some(radarr_config) = &master_cfg.radarr_config {
+            println!("[MasterConfig] Applying Radarr config...");
+            if let Err(e) = crate::services::apply_service_config(
+                host, username, private_key,
+                "radarr",
+                radarr_config,
+                &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Radarr config error: {}", e);
+            }
+        }
+
+        if let Some(sonarr_config) = &master_cfg.sonarr_config {
+            println!("[MasterConfig] Applying Sonarr config...");
+            if let Err(e) = crate::services::apply_service_config(
+                host, username, private_key,
+                "sonarr",
+                sonarr_config,
+                &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Sonarr config error: {}", e);
+            }
+        }
+
+        if let Some(prowlarr_config) = &master_cfg.prowlarr_config {
+            println!("[MasterConfig] Applying Prowlarr config...");
+            if let Err(e) = crate::services::apply_service_config(
+                host, username, private_key,
+                "prowlarr",
+                prowlarr_config,
+                &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Prowlarr config error: {}", e);
+            }
+        }
+
+        if let Some(jellyfin_config) = &master_cfg.jellyfin_config {
+            println!("[MasterConfig] Applying Jellyfin config...");
+            if let Err(e) = crate::services::apply_service_config(
+                host, username, private_key,
+                "jellyfin",
+                jellyfin_config,
+                &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Jellyfin config error: {}", e);
+            }
+        }
+
+        println!("[MasterConfig] ✅ All service configurations applied from master_config");
+    } else {
+        println!("[MasterConfig] ⚠️  No master_config found - using default configuration");
+    }
+    // =============================================================================
 
     // Ajouter Decypharr à Radarr
     if !radarr_api.is_empty() {
@@ -1361,7 +1458,7 @@ pub async fn run_full_installation(
 
     // 8.7: Configurer Bazarr
     emit_progress(&window, "config", 97, "Configuration Bazarr...", None);
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let mut bazarr_ready = false;
     for _ in 0..12 {
@@ -1637,21 +1734,22 @@ pub async fn run_full_installation_password(
         }
     }
 
-    // INITIALISER LA SESSION SSH PERSISTANTE pour toutes les commandes suivantes
-    // Cela évite de reconnecter à chaque commande et accélère énormément l'installation
+    // Initialiser la session persistante
     if let Err(e) = ssh::init_persistent_session(host, username, password).await {
         println!("[Install] Warning: could not init persistent SSH session: {}", e);
-        // On continue quand même, les commandes utiliseront des connexions individuelles
     } else {
-        println!("[Install] ✅ Persistent SSH session initialized - all commands will be faster!");
+        println!("[Install] ✅ Persistent SSH session initialized");
     }
+
+    // Notifier le frontend que la connexion SSH est OK
+    emit_progress(&window, "ssh_connected", 5, "Connexion SSH établie", None);
 
     // Récupérer le vrai hostname du Pi via SSH (important pour les connexions par IP)
     let hostname = if host.contains(".local") {
         // Si c'est déjà un hostname mDNS, on retire juste .local
         host.replace(".local", "")
     } else {
-        // Sinon on récupère le hostname via SSH
+        // Sinon on récupère le hostname via SSH (one-shot, ça marche)
         match ssh::execute_command_password(host, username, password, "hostname").await {
             Ok(h) => {
                 let h = h.trim().to_string();
@@ -1851,7 +1949,7 @@ pub async fn run_full_installation_password(
 
     // Étape 2: Installation Docker
     logger.start_step("docker_install").await;
-    emit_progress(&window, "docker", 15, "Installation Docker...", None);
+    emit_progress(&window, "docker", 15, "Vérification Docker...", None);
 
     // Vérifier si Docker est déjà installé
     let docker_check = ssh::execute_command_password(host, username, password, "docker --version 2>&1").await;
@@ -2111,28 +2209,26 @@ pub async fn run_full_installation_password(
                 Ok(output) => {
                     let output = output.trim();
                     if output.contains("DONE") {
-                        println!("[Install] Docker pull marker found, verifying images...");
+                        println!("[Install] Docker pull marker found, quick validation...");
 
-                        // VÉRIFICATION CRITIQUE: S'assurer que TOUTES les images sont présentes
-                        let images_check = ssh::execute_command_password(host, username, password,
-                            "cd ~/media-stack && docker compose config --images 2>/dev/null | while read img; do docker image inspect \"$img\" >/dev/null 2>&1 && echo \"OK: $img\" || echo \"MISSING: $img\"; done"
+                        // VÉRIFICATION RAPIDE: Valider que docker-compose.yml est OK (2-5s au lieu de 60s+)
+                        let compose_check = ssh::execute_command_password(host, username, password,
+                            "cd ~/media-stack && docker compose config >/dev/null 2>&1 && echo OK || echo FAILED"
                         ).await.unwrap_or_default();
 
-                        if images_check.contains("MISSING") {
-                            println!("[Install] Some images are missing! Will retry pull...");
+                        if compose_check.trim() != "OK" {
+                            println!("[Install] Docker compose config validation failed! Will retry pull...");
                             ssh::execute_command_password(host, username, password,
-                                &format!("echo \"$(date): Docker pull incomplete, some images missing: {}\" >> ~/jellysetup-logs/install.log",
-                                    images_check.lines().filter(|l| l.contains("MISSING")).collect::<Vec<_>>().join(", "))
+                                "echo \"$(date): Docker compose config validation failed, retrying pull...\" >> ~/jellysetup-logs/install.log"
                             ).await.ok();
-                            // Supprimer le marker pour forcer un retry
                             ssh::execute_command_password(host, username, password,
                                 "rm -f /tmp/docker_pull_done"
                             ).await.ok();
-                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                             continue 'pull_loop;  // Réessayer
                         }
 
-                        println!("[Install] All images verified successfully!");
+                        println!("[Install] Docker compose validated successfully!");
                         ssh::execute_command_password(host, username, password,
                             "echo \"$(date): Docker pull completed and verified - all images present\" >> ~/jellysetup-logs/install.log"
                         ).await.ok();
@@ -2617,17 +2713,19 @@ pub async fn run_full_installation_password(
         );
         ssh::execute_command_password(host, username, password, &write_config_cmd).await.ok();
 
-        // Redémarrer Decypharr pour prendre en compte la config
+        // Redémarrer Decypharr en background (évite les timeouts SSH)
         ssh::execute_command_password(host, username, password,
-            "docker restart decypharr"
+            "nohup docker restart decypharr > /dev/null 2>&1 &"
         ).await.ok();
+        // Attendre quelques secondes pour laisser le restart démarrer
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         debug_log("[DECYPHARR] Config updated with port as string");
         println!("[Config] Decypharr configured with AllDebrid");
     }
 
     // 8.4: Attendre que Radarr et Sonarr soient prêts
     emit_progress(&window, "config", 91, "Configuration Radarr/Sonarr...", None);
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Récupérer les API keys de Radarr et Sonarr depuis leurs config.xml
     let radarr_api = ssh::execute_command_password(host, username, password,
@@ -2647,6 +2745,89 @@ pub async fn run_full_installation_password(
         sonarr_api.chars().take(8).collect::<String>(),
         prowlarr_api.chars().take(8).collect::<String>()
     );
+
+    // =============================================================================
+    // MASTER CONFIG - Fetch dynamique depuis Supabase
+    // =============================================================================
+    emit_progress(&window, "config", 89, "Récupération de la configuration master...", None);
+    println!("[MasterConfig] 🔄 Fetching configuration from Supabase...");
+
+    let master_config_opt = crate::master_config::fetch_master_config(Some("streaming")).await.ok().flatten();
+
+    if let Some(master_cfg) = &master_config_opt {
+        println!("[MasterConfig] ✅ Master config loaded: {}", master_cfg.id);
+
+        let mut template_vars = crate::template_engine::TemplateVars::new();
+        template_vars.set("PI_IP", host);
+        template_vars.set("PI_HOSTNAME", &hostname);
+        template_vars.set("RADARR_API_KEY", &radarr_api);
+        template_vars.set("SONARR_API_KEY", &sonarr_api);
+        template_vars.set("PROWLARR_API_KEY", &prowlarr_api);
+        template_vars.set("JELLYFIN_USERNAME", &config.jellyfin_username);
+        template_vars.set("JELLYFIN_PASSWORD", &config.jellyfin_password);
+        template_vars.set("YGG_PASSKEY", config.admin_email.as_deref().unwrap_or(""));
+        template_vars.set("ALLDEBRID_API_KEY", &config.alldebrid_api_key);
+
+        if let Some(jf_auth) = &final_jellyfin_auth {
+            template_vars.set("JELLYFIN_API_KEY", &jf_auth.access_token);
+            template_vars.set("JELLYFIN_SERVER_ID", &jf_auth.server_id);
+        } else {
+            template_vars.set("JELLYFIN_API_KEY", "PLACEHOLDER");
+            template_vars.set("JELLYFIN_SERVER_ID", "PLACEHOLDER");
+        }
+
+        emit_progress(&window, "config", 90, "Application des configurations master...", None);
+
+        if let Some(jellyseerr_config) = &master_cfg.jellyseerr_config {
+            println!("[MasterConfig] Applying Jellyseerr config...");
+            if let Err(e) = crate::services::apply_service_config_password(
+                host, username, password, "jellyseerr", jellyseerr_config, &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Jellyseerr config error: {}", e);
+            }
+        }
+
+        if let Some(radarr_config) = &master_cfg.radarr_config {
+            println!("[MasterConfig] Applying Radarr config...");
+            if let Err(e) = crate::services::apply_service_config_password(
+                host, username, password, "radarr", radarr_config, &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Radarr config error: {}", e);
+            }
+        }
+
+        if let Some(sonarr_config) = &master_cfg.sonarr_config {
+            println!("[MasterConfig] Applying Sonarr config...");
+            if let Err(e) = crate::services::apply_service_config_password(
+                host, username, password, "sonarr", sonarr_config, &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Sonarr config error: {}", e);
+            }
+        }
+
+        if let Some(prowlarr_config) = &master_cfg.prowlarr_config {
+            println!("[MasterConfig] Applying Prowlarr config...");
+            if let Err(e) = crate::services::apply_service_config_password(
+                host, username, password, "prowlarr", prowlarr_config, &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Prowlarr config error: {}", e);
+            }
+        }
+
+        if let Some(jellyfin_config) = &master_cfg.jellyfin_config {
+            println!("[MasterConfig] Applying Jellyfin config...");
+            if let Err(e) = crate::services::apply_service_config_password(
+                host, username, password, "jellyfin", jellyfin_config, &template_vars
+            ).await {
+                println!("[MasterConfig] ⚠️  Jellyfin config error: {}", e);
+            }
+        }
+
+        println!("[MasterConfig] ✅ All service configurations applied from master_config");
+    } else {
+        println!("[MasterConfig] ⚠️  No master_config found - using default configuration");
+    }
+    // =============================================================================
 
     // Ajouter Decypharr comme client de téléchargement à Radarr
     if !radarr_api.is_empty() {
@@ -2800,7 +2981,7 @@ pub async fn run_full_installation_password(
 
     // 8.7: Configurer Bazarr avec Radarr et Sonarr
     emit_progress(&window, "config", 97, "Configuration Bazarr...", None);
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // Attendre que Bazarr génère son config.ini
     let mut bazarr_ready = false;

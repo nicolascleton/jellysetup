@@ -8,6 +8,9 @@ mod supabase;
 mod flash;
 mod crypto;
 mod logging;
+mod master_config;
+mod template_engine;
+mod services;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, Window};

@@ -109,32 +109,22 @@ impl PersistentSession {
         let mut output = String::new();
 
         loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(300),
-                channel.wait()
-            ).await {
-                Ok(Some(ChannelMsg::Data { data })) => {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => {
                     output.push_str(&String::from_utf8_lossy(&data));
                 }
-                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
-                    let stderr = String::from_utf8_lossy(&data);
-                    output.push_str("[stderr] ");
-                    output.push_str(&stderr);
+                Some(ChannelMsg::ExtendedData { data, .. }) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
                 }
-                Ok(Some(ChannelMsg::ExitStatus { .. })) => {
-                    // Continue pour recevoir EOF
-                }
-                Ok(Some(ChannelMsg::Eof)) => {
+                Some(ChannelMsg::ExitStatus { exit_status }) => {
+                    if exit_status != 0 {
+                        tracing::warn!("Command exited with status {}: {}", exit_status, output);
+                    }
                     break;
                 }
-                Ok(None) => {
-                    break;
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    println!("[SSH-P] Command timeout");
-                    break;
-                }
+                Some(ChannelMsg::Eof) => break,
+                None => break,
+                _ => {}
             }
         }
 
@@ -512,55 +502,29 @@ async fn execute_on_session(
 
     let mut output = String::new();
 
-    let read_future = async {
-        loop {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(60),
-                channel.wait()
-            ).await {
-                Ok(Some(ChannelMsg::Data { data })) => {
-                    output.push_str(&String::from_utf8_lossy(&data));
-                }
-                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
-                    let stderr = String::from_utf8_lossy(&data);
-                    output.push_str("[stderr] ");
-                    output.push_str(&stderr);
-                }
-                Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
-                    println!("[SSH] Exit status: {}", exit_status);
-                    if exit_status != 0 {
-                        tracing::warn!("Command exited with status {}: {}", exit_status, output);
-                    }
-                    break;
-                }
-                Ok(Some(ChannelMsg::Eof)) => {
-                    println!("[SSH] Got EOF");
-                    break;
-                }
-                Ok(None) => {
-                    println!("[SSH] Channel closed");
-                    break;
-                }
-                Ok(_) => {}
-                Err(_) => {
-                    println!("[SSH] Read timeout, returning partial output");
-                    break;
-                }
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => {
+                output.push_str(&String::from_utf8_lossy(&data));
             }
+            Some(ChannelMsg::ExtendedData { data, .. }) => {
+                output.push_str(&String::from_utf8_lossy(&data));
+            }
+            Some(ChannelMsg::ExitStatus { exit_status }) => {
+                if exit_status != 0 {
+                    tracing::warn!("Command exited with status {}: {}", exit_status, output);
+                }
+                break;
+            }
+            Some(ChannelMsg::Eof) => break,
+            None => break,
+            _ => {}
         }
-    };
-
-    if tokio::time::timeout(std::time::Duration::from_secs(300), read_future).await.is_err() {
-        println!("[SSH] Global command timeout (5min)");
     }
 
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), channel.eof()).await;
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        session.disconnect(Disconnect::ByApplication, "", "")
-    ).await;
+    let _ = channel.eof().await;
+    let _ = session.disconnect(Disconnect::ByApplication, "", "").await;
 
-    println!("[SSH] Command done, output length: {}", output.len());
     Ok(output)
 }
 
