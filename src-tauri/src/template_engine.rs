@@ -27,8 +27,8 @@ impl TemplateVars {
             match self.vars.get(var_name) {
                 Some(value) => value.clone(),
                 None => {
-                    println!("[Template] Warning: Variable {{{{{}}}}} not found, keeping placeholder", var_name);
-                    caps.get(0).unwrap().as_str().to_string()
+                    println!("[Template] Warning: Variable {{{{{}}}}} not found, replacing with empty string", var_name);
+                    String::new()
                 }
             }
         }).to_string()
@@ -78,7 +78,7 @@ mod tests {
     fn test_unknown_var() {
         let vars = TemplateVars::new();
         let template = "{{UNKNOWN}}";
-        assert_eq!(vars.replace(template), "{{UNKNOWN}}");
+        assert_eq!(vars.replace(template), "");
     }
 
     #[test]
