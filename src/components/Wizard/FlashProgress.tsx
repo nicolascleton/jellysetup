@@ -36,6 +36,7 @@ export default function FlashProgress({ onComplete, onError }: FlashProgressProp
 
   // Protection contre les lancements multiples (React StrictMode, remount, etc.)
   const hasStarted = useRef(false);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     // Ne lancer qu'une seule fois, même si le composant est remonté
@@ -46,22 +47,40 @@ export default function FlashProgress({ onComplete, onError }: FlashProgressProp
     hasStarted.current = true;
     console.log('[FlashProgress] Starting flash (first time)');
 
-    startFlashing();
-    const unlisten = listen<ProgressEvent>('flash-progress', (event) => {
-      const { step, percent, message } = event.payload;
-      setProgress(percent);
-      setCurrentMessage(message);
-      setSteps((prev) =>
-        prev.map((s) => {
-          if (s.id === step) return { ...s, status: 'active' };
-          else if (prev.findIndex((x) => x.id === step) > prev.findIndex((x) => x.id === s.id))
-            return { ...s, status: 'complete' };
-          return s;
-        })
-      );
-      addLog(message);
-    });
-    return () => { unlisten.then((fn) => fn()); };
+    // Setup listener et lancer le flash avec async/await
+    const setup = async () => {
+      // D'abord enregistrer le listener et attendre qu'il soit prêt
+      const unlisten = await listen<ProgressEvent>('flash-progress', (event) => {
+        const { step, percent, message } = event.payload;
+        console.log('[FlashProgress] Event received:', step, percent, message);
+        setProgress(percent);
+        setCurrentMessage(message);
+        setSteps((prev) =>
+          prev.map((s) => {
+            if (s.id === step) return { ...s, status: 'active' };
+            else if (prev.findIndex((x) => x.id === step) > prev.findIndex((x) => x.id === s.id))
+              return { ...s, status: 'complete' };
+            return s;
+          })
+        );
+        addLog(message);
+      });
+
+      // Stocker la fonction de cleanup
+      unlistenRef.current = unlisten;
+      console.log('[FlashProgress] Listener ready, starting flash...');
+
+      // Maintenant lancer le flash
+      startFlashing();
+    };
+
+    setup();
+
+    return () => {
+      if (unlistenRef.current) {
+        unlistenRef.current();
+      }
+    };
   }, []);
 
   const startFlashing = async () => {
@@ -93,7 +112,14 @@ export default function FlashProgress({ onComplete, onError }: FlashProgressProp
       setCurrentMessage('Carte SD prête !');
       setTimeout(onComplete, 1500);
     } catch (err) {
-      setError(String(err));
+      const errorStr = String(err);
+      // Si un flash est déjà en cours (après HMR par exemple), on continue juste à écouter
+      if (errorStr.includes('already in progress')) {
+        console.log('[FlashProgress] Flash already running, continuing to listen...');
+        addLog('Flash déjà en cours, écoute des événements...');
+        return;
+      }
+      setError(errorStr);
       addLog(`ERREUR: ${err}`);
     }
   };

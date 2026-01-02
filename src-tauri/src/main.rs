@@ -46,9 +46,18 @@ pub struct InstallConfig {
     pub alldebrid_api_key: String,
     pub jellyfin_username: String,
     pub jellyfin_password: String,
+    pub jellyfin_server_name: String,
+    pub admin_email: Option<String>,
     pub ygg_passkey: Option<String>,
     pub discord_webhook: Option<String>,
     pub cloudflare_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JellyfinAuth {
+    pub server_id: String,
+    pub access_token: String,
+    pub user_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +66,8 @@ pub struct FlashProgress {
     pub percent: u32,
     pub message: String,
     pub speed: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jellyfin_auth: Option<JellyfinAuth>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

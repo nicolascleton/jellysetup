@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/tauri';
 import { listen } from '@tauri-apps/api/event';
 import { Check, Loader2, Cpu, RefreshCw, AlertTriangle } from 'lucide-react';
-import { useStore, PiInfo } from '../../lib/store';
+import { useStore, PiInfo, JellyfinAuth } from '../../lib/store';
 
 interface ConfigProgressProps {
   piInfo: PiInfo;
@@ -11,7 +11,7 @@ interface ConfigProgressProps {
 }
 
 export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigProgressProps) {
-  const { config, sshCredentials, addLog, setInstallationId } = useStore();
+  const { config, sshCredentials, addLog, setInstallationId, setJellyfinAuth } = useStore();
   const [steps] = useState([
     'Connexion SSH', 'Mise à jour', 'Docker', 'Reboot', 'Structure', 'Docker Compose', 'Services', 'Configuration', 'Finalisation'
   ]);
@@ -38,15 +38,21 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
 
   useEffect(() => {
     // Écouter les événements de progression du backend
-    const unlisten = listen<{ step: string; percent: number; message: string }>('flash-progress', (event) => {
+    const unlisten = listen<{ step: string; percent: number; message: string; jellyfin_auth?: JellyfinAuth }>('flash-progress', (event) => {
       console.log('[ConfigProgress] Progress event:', event.payload);
-      const { step, percent, message } = event.payload;
+      const { step, percent, message, jellyfin_auth } = event.payload;
 
       setProgress(percent);
       setStatusMessage(message);
 
       if (stepMap[step] !== undefined) {
         setCurrentStep(stepMap[step]);
+      }
+
+      // Capturer les données d'auth Jellyfin pour auto-login
+      if (jellyfin_auth) {
+        console.log('[ConfigProgress] Jellyfin auth received:', jellyfin_auth);
+        setJellyfinAuth(jellyfin_auth);
       }
 
       addLog(message);
@@ -106,6 +112,8 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
             alldebrid_api_key: config.alldebridKey,
             jellyfin_username: config.jellyfinUsername,
             jellyfin_password: config.jellyfinPassword,
+            jellyfin_server_name: config.jellyfinServerName || config.hostname,
+            admin_email: config.adminEmail || null,
             ygg_passkey: config.yggPasskey || null,
             discord_webhook: config.discordWebhook || null,
             cloudflare_token: config.cloudflareToken || null,
@@ -120,6 +128,8 @@ export default function ConfigProgress({ piInfo, onComplete, onError }: ConfigPr
             alldebrid_api_key: config.alldebridKey,
             jellyfin_username: config.jellyfinUsername,
             jellyfin_password: config.jellyfinPassword,
+            jellyfin_server_name: config.jellyfinServerName || config.hostname,
+            admin_email: config.adminEmail || null,
             ygg_passkey: config.yggPasskey || null,
             discord_webhook: config.discordWebhook || null,
             cloudflare_token: config.cloudflareToken || null,

@@ -1,9 +1,10 @@
-import { HardDrive, Search, Settings, ArrowRight, Sparkles } from 'lucide-react';
+import { HardDrive, Search, Settings, ArrowRight, Sparkles, Monitor } from 'lucide-react';
 
 interface MainMenuProps {
   onNewSetup: () => void;
   onConnectExisting: () => void;
   onReconfigure: () => void;
+  onViewServices?: () => void;
   hasExistingConfig: boolean;
 }
 
@@ -11,6 +12,7 @@ export default function MainMenu({
   onNewSetup,
   onConnectExisting,
   onReconfigure,
+  onViewServices,
   hasExistingConfig
 }: MainMenuProps) {
   return (
@@ -21,7 +23,7 @@ export default function MainMenu({
           <span className="text-4xl">🍓</span>
         </div>
         <h2 className="text-2xl font-bold text-white mb-2">
-          Bienvenue sur JellySetup
+          Bienvenue sur EasyJelly
         </h2>
         <p className="text-zinc-400 text-sm">
           Configurez votre media center Raspberry Pi en quelques clics
@@ -105,6 +107,29 @@ export default function MainMenu({
             <ArrowRight className="w-5 h-5 text-zinc-600 group-hover:text-green-400 group-hover:translate-x-1 transition-all" />
           </div>
         </button>
+
+        {/* Option 4: Voir les services */}
+        {onViewServices && (
+          <button
+            onClick={onViewServices}
+            className="w-full card !p-5 group hover:border-orange-500/50 hover:bg-orange-500/5 transition-all duration-300 text-left"
+          >
+            <div className="flex items-start gap-4">
+              <div className="w-12 h-12 bg-gradient-to-br from-orange-500 to-amber-500 rounded-xl flex items-center justify-center flex-shrink-0 group-hover:scale-110 transition-transform">
+                <Monitor className="w-6 h-6 text-white" />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold text-white">
+                  Voir les services
+                </h3>
+                <p className="text-sm text-zinc-400 mt-1">
+                  Accéder aux services d'un Pi déjà configuré
+                </p>
+              </div>
+              <ArrowRight className="w-5 h-5 text-zinc-600 group-hover:text-orange-400 group-hover:translate-x-1 transition-all" />
+            </div>
+          </button>
+        )}
       </div>
 
       {/* Info */}

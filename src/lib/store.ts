@@ -22,6 +22,10 @@ export interface Config {
   // Jellyfin
   jellyfinUsername: string;
   jellyfinPassword: string;
+  jellyfinServerName: string;
+
+  // Email admin (pour Jellyseerr)
+  adminEmail?: string;
 
   // Optionnel
   yggPasskey?: string;
@@ -47,6 +51,12 @@ export interface SSHCredentials {
   privateKey: string;
 }
 
+export interface JellyfinAuth {
+  server_id: string;
+  access_token: string;
+  user_id: string;
+}
+
 interface Store {
   // Configuration utilisateur
   config: Config;
@@ -67,6 +77,10 @@ interface Store {
   // ID installation Supabase
   installationId: string | null;
   setInstallationId: (id: string | null) => void;
+
+  // Auth Jellyfin pour auto-login
+  jellyfinAuth: JellyfinAuth | null;
+  setJellyfinAuth: (auth: JellyfinAuth | null) => void;
 
   // Progression
   currentStep: string;
@@ -98,6 +112,8 @@ export const useStore = create<Store>()(
         alldebridKey: '',
         jellyfinUsername: '',
         jellyfinPassword: '',
+        jellyfinServerName: 'jellypi',
+        adminEmail: '',
       },
       setConfig: (newConfig) =>
         set((state) => ({
@@ -120,6 +136,10 @@ export const useStore = create<Store>()(
       installationId: null,
       setInstallationId: (id) => set({ installationId: id }),
 
+      // Auth Jellyfin
+      jellyfinAuth: null,
+      setJellyfinAuth: (auth) => set({ jellyfinAuth: auth }),
+
       // Progression
       currentStep: '',
       setCurrentStep: (step) => set({ currentStep: step }),
@@ -133,7 +153,7 @@ export const useStore = create<Store>()(
       clearLogs: () => set({ logs: [] }),
     }),
     {
-      name: 'jellysetup-storage-v4',
+      name: 'jellysetup-storage-v5',
       partialize: (state) => ({
         // Ne persister que les données importantes
         config: state.config,

@@ -128,7 +128,7 @@ pub async fn ensure_schema_initialized(pi_name: &str) -> Result<String> {
     }
 }
 
-/// Sauvegarde une installation dans le schéma dédié au Pi
+/// Sauvegarde une installation dans le schéma dédié au Pi via Edge Function
 /// Note: ssh_public_key et ssh_private_key_encrypted sont optionnels pour les installations par mot de passe
 pub async fn save_installation(
     pi_name: &str,
@@ -138,121 +138,30 @@ pub async fn save_installation(
     ssh_host_fingerprint: Option<&str>,
     installer_version: &str,
 ) -> Result<String> {
-    // S'assurer que le schéma existe et récupérer son nom
-    let schema_name = ensure_schema_initialized(pi_name).await?;
+    // S'assurer que le schéma existe
+    ensure_schema_initialized(pi_name).await?;
 
     let client = reqwest::Client::new();
     let supabase_url = get_supabase_url();
     let service_key = get_supabase_service_key();
 
-    // Vérifier si une config existe déjà dans ce schéma
-    let existing = check_existing_config(&schema_name).await?;
-
-    if let Some(id) = existing {
-        // Mettre à jour la config existante (reflash de carte SD = nouveau fingerprint)
-        let mut body = json!({
+    // Utiliser l'Edge Function pour éviter les problèmes de schémas non exposés
+    let body = json!({
+        "action": "save_installation",
+        "pi_name": pi_name,
+        "data": {
             "local_ip": pi_ip,
-            "status": "updating",
-            "installer_version": installer_version,
-            "last_seen": chrono::Utc::now().to_rfc3339()
-        });
-
-        // Ajouter les clés SSH si fournies (auth par clé)
-        if let Some(pub_key) = ssh_public_key {
-            body["ssh_public_key"] = json!(pub_key);
+            "ssh_public_key": ssh_public_key,
+            "ssh_private_key_encrypted": ssh_private_key_encrypted,
+            "ssh_host_fingerprint": ssh_host_fingerprint,
+            "installer_version": installer_version
         }
-        if let Some(priv_key) = ssh_private_key_encrypted {
-            body["ssh_private_key_encrypted"] = json!(priv_key);
-        }
-
-        // Toujours mettre à jour le fingerprint si fourni (important lors d'un reflash)
-        if let Some(fp) = ssh_host_fingerprint {
-            body["ssh_host_fingerprint"] = json!(fp);
-            println!("[Supabase] Updating host fingerprint (SD card reflash detected)");
-        }
-
-        client
-            .patch(format!(
-                "{}/rest/v1/config?id=eq.{}",
-                supabase_url, id
-            ))
-            .header("apikey", &service_key)
-            .header("Authorization", format!("Bearer {}", service_key))
-            .header("Content-Type", "application/json")
-            .header("Content-Profile", &schema_name)
-            .json(&body)
-            .send()
-            .await?;
-
-        println!("[Supabase] Updated config in schema '{}': {}", schema_name, id);
-        return Ok(id);
-    }
-
-    // Mettre à jour la config créée automatiquement par l'init
-    let mut body = json!({
-        "local_ip": pi_ip,
-        "status": "pending",
-        "installer_version": installer_version
     });
 
-    // Ajouter les clés SSH si fournies (auth par clé)
-    if let Some(pub_key) = ssh_public_key {
-        body["ssh_public_key"] = json!(pub_key);
-    }
-    if let Some(priv_key) = ssh_private_key_encrypted {
-        body["ssh_private_key_encrypted"] = json!(priv_key);
-    }
-    if let Some(fp) = ssh_host_fingerprint {
-        body["ssh_host_fingerprint"] = json!(fp);
-    }
-
-    // Récupérer l'ID de la config existante (créée par l'init)
     let response = client
-        .get(format!("{}/rest/v1/config?select=id&limit=1", supabase_url))
-        .header("apikey", &service_key)
-        .header("Authorization", format!("Bearer {}", service_key))
-        .header("Accept-Profile", &schema_name)
-        .send()
-        .await;
-
-    // Gérer les erreurs Supabase sans bloquer
-    let configs: Vec<ConfigRow> = match response {
-        Ok(resp) => resp.json().await.unwrap_or_default(),
-        Err(e) => {
-            println!("[Supabase] Warning: could not fetch config: {}", e);
-            vec![]
-        }
-    };
-
-    if let Some(config) = configs.first() {
-        if let Some(id) = &config.id {
-            // Mettre à jour cette config
-            client
-                .patch(format!(
-                    "{}/rest/v1/config?id=eq.{}",
-                    supabase_url, id
-                ))
-                .header("apikey", &service_key)
-                .header("Authorization", format!("Bearer {}", service_key))
-                .header("Content-Type", "application/json")
-                .header("Content-Profile", &schema_name)
-                .json(&body)
-                .send()
-                .await?;
-
-            println!("[Supabase] Updated config in schema '{}': {}", schema_name, id);
-            return Ok(id.clone());
-        }
-    }
-
-    // Si pas de config, en créer une (ne devrait pas arriver)
-    let response = client
-        .post(format!("{}/rest/v1/config", supabase_url))
-        .header("apikey", &service_key)
+        .post(format!("{}/functions/v1/jellysetup-api", supabase_url))
         .header("Authorization", format!("Bearer {}", service_key))
         .header("Content-Type", "application/json")
-        .header("Content-Profile", &schema_name)
-        .header("Prefer", "return=representation")
         .json(&body)
         .send()
         .await?;
@@ -261,79 +170,102 @@ pub async fn save_installation(
     let text = response.text().await?;
 
     if !status.is_success() {
-        println!("[Supabase] Warning creating config: {} - {}", status, text);
-        // Ne pas bloquer l'installation pour une erreur Supabase
+        println!("[Supabase] Error saving installation: {} - {}", status, text);
         return Ok("local".to_string());
     }
 
-    let result: Vec<ConfigRow> = serde_json::from_str(&text).unwrap_or_default();
-    let id = result.first().and_then(|i| i.id.clone()).unwrap_or_else(|| "local".to_string());
-
-    println!("[Supabase] Created config in schema '{}': {}", schema_name, id);
-    Ok(id)
-}
-
-/// Met à jour le statut d'une installation
-pub async fn update_status(pi_name: &str, config_id: &str, status: &str, error: Option<&str>) -> Result<()> {
-    let schema_name = pi_name_to_schema(pi_name);
-    let client = reqwest::Client::new();
-    let supabase_url = get_supabase_url();
-    let service_key = get_supabase_service_key();
-
-    let mut body = json!({
-        "status": status,
-        "last_seen": chrono::Utc::now().to_rfc3339()
-    });
-
-    if let Some(err) = error {
-        body["error_message"] = json!(err);
+    #[derive(serde::Deserialize)]
+    struct ApiResponse {
+        success: bool,
+        data: Option<ApiData>,
+        error: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ApiData {
+        config_id: Option<String>,
     }
 
-    client
-        .patch(format!(
-            "{}/rest/v1/config?id=eq.{}",
-            supabase_url, config_id
-        ))
-        .header("apikey", &service_key)
-        .header("Authorization", format!("Bearer {}", service_key))
-        .header("Content-Type", "application/json")
-        .header("Content-Profile", &schema_name)
-        .json(&body)
-        .send()
-        .await?;
+    let result: ApiResponse = serde_json::from_str(&text).unwrap_or(ApiResponse {
+        success: false,
+        data: None,
+        error: Some("Parse error".to_string()),
+    });
 
-    Ok(())
+    if result.success {
+        let config_id = result.data.and_then(|d| d.config_id).unwrap_or_else(|| "local".to_string());
+        println!("[Supabase] Installation saved via Edge Function: {}", config_id);
+        return Ok(config_id);
+    }
+
+    println!("[Supabase] Warning: {}", result.error.unwrap_or_default());
+    Ok("local".to_string())
 }
 
-/// Ajoute un log d'installation dans le schéma du Pi
-pub async fn add_log(
-    pi_name: &str,
-    step: &str,
-    status: &str,
-    message: &str,
-    duration_ms: Option<i64>,
-) -> Result<()> {
-    let schema_name = pi_name_to_schema(pi_name);
+/// Met à jour le statut d'une installation via Edge Function
+pub async fn update_status(pi_name: &str, config_id: &str, status: &str, error: Option<&str>) -> Result<()> {
     let client = reqwest::Client::new();
     let supabase_url = get_supabase_url();
     let service_key = get_supabase_service_key();
 
     let body = json!({
-        "step": step,
-        "status": status,
-        "message": message,
-        "duration_ms": duration_ms
+        "action": "update_status",
+        "pi_name": pi_name,
+        "data": {
+            "config_id": config_id,
+            "status": status,
+            "error_message": error
+        }
     });
 
-    client
-        .post(format!("{}/rest/v1/logs", supabase_url))
-        .header("apikey", &service_key)
+    let response = client
+        .post(format!("{}/functions/v1/jellysetup-api", supabase_url))
         .header("Authorization", format!("Bearer {}", service_key))
         .header("Content-Type", "application/json")
-        .header("Content-Profile", &schema_name)
         .json(&body)
         .send()
         .await?;
+
+    if !response.status().is_success() {
+        println!("[Supabase] Warning updating status: {}", response.text().await.unwrap_or_default());
+    }
+
+    Ok(())
+}
+
+/// Ajoute un log d'installation dans le schéma du Pi via Edge Function
+pub async fn add_log(
+    pi_name: &str,
+    step: &str,
+    level: &str,
+    message: &str,
+    duration_ms: Option<i64>,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+    let supabase_url = get_supabase_url();
+    let service_key = get_supabase_service_key();
+
+    let body = json!({
+        "action": "add_log",
+        "pi_name": pi_name,
+        "data": {
+            "step": step,
+            "level": level,
+            "message": message,
+            "duration_ms": duration_ms
+        }
+    });
+
+    let response = client
+        .post(format!("{}/functions/v1/jellysetup-api", supabase_url))
+        .header("Authorization", format!("Bearer {}", service_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        println!("[Supabase] Warning adding log: {}", response.text().await.unwrap_or_default());
+    }
 
     Ok(())
 }
@@ -373,54 +305,53 @@ async fn check_existing_config(schema_name: &str) -> Result<Option<String>> {
     }
 }
 
-/// Sauvegarde la configuration du Pi (credentials, services, etc.)
+/// Sauvegarde la configuration du Pi (credentials, services, etc.) via Edge Function
 pub async fn save_pi_config(
     pi_name: &str,
     config_id: &str,
     alldebrid_key: Option<&str>,
     ygg_passkey: Option<&str>,
     cloudflare_token: Option<&str>,
-    services_config: Option<serde_json::Value>,
+    jellyfin_api_key: Option<&str>,
+    radarr_api_key: Option<&str>,
+    sonarr_api_key: Option<&str>,
+    prowlarr_api_key: Option<&str>,
 ) -> Result<()> {
-    let schema_name = pi_name_to_schema(pi_name);
     let client = reqwest::Client::new();
     let supabase_url = get_supabase_url();
     let service_key = get_supabase_service_key();
 
-    let mut body = json!({
-        "last_seen": chrono::Utc::now().to_rfc3339()
+    let body = json!({
+        "action": "save_credentials",
+        "pi_name": pi_name,
+        "data": {
+            "config_id": config_id,
+            "alldebrid_api_key": alldebrid_key,
+            "ygg_passkey": ygg_passkey,
+            "cloudflare_token": cloudflare_token,
+            "jellyfin_api_key": jellyfin_api_key,
+            "radarr_api_key": radarr_api_key,
+            "sonarr_api_key": sonarr_api_key,
+            "prowlarr_api_key": prowlarr_api_key
+        }
     });
 
-    if let Some(key) = alldebrid_key {
-        body["alldebrid_api_key"] = json!(key);
-    }
-    if let Some(key) = ygg_passkey {
-        body["ygg_passkey"] = json!(key);
-    }
-    if let Some(token) = cloudflare_token {
-        body["cloudflare_token"] = json!(token);
-    }
-    if let Some(config) = services_config {
-        body["services_config"] = config;
-    }
-
-    client
-        .patch(format!(
-            "{}/rest/v1/config?id=eq.{}",
-            supabase_url, config_id
-        ))
-        .header("apikey", &service_key)
+    let response = client
+        .post(format!("{}/functions/v1/jellysetup-api", supabase_url))
         .header("Authorization", format!("Bearer {}", service_key))
         .header("Content-Type", "application/json")
-        .header("Content-Profile", &schema_name)
         .json(&body)
         .send()
         .await?;
 
+    if !response.status().is_success() {
+        println!("[Supabase] Warning saving credentials: {}", response.text().await.unwrap_or_default());
+    }
+
     Ok(())
 }
 
-/// Enregistre un service Docker dans le schéma du Pi
+/// Enregistre un service Docker dans le schéma du Pi via Edge Function
 pub async fn save_service(
     pi_name: &str,
     service_name: &str,
@@ -430,41 +361,34 @@ pub async fn save_service(
     image: Option<&str>,
     config: Option<serde_json::Value>,
 ) -> Result<()> {
-    let schema_name = pi_name_to_schema(pi_name);
     let client = reqwest::Client::new();
     let supabase_url = get_supabase_url();
     let service_key = get_supabase_service_key();
 
-    let mut body = json!({
-        "service_name": service_name,
-        "status": status,
-        "last_health_check": chrono::Utc::now().to_rfc3339()
+    let body = json!({
+        "action": "save_service",
+        "pi_name": pi_name,
+        "data": {
+            "service_name": service_name,
+            "container_id": container_id,
+            "status": status,
+            "port": port,
+            "image": image,
+            "config": config
+        }
     });
 
-    if let Some(id) = container_id {
-        body["container_id"] = json!(id);
-    }
-    if let Some(p) = port {
-        body["port"] = json!(p);
-    }
-    if let Some(img) = image {
-        body["image"] = json!(img);
-    }
-    if let Some(cfg) = config {
-        body["config"] = cfg;
-    }
-
-    // Upsert basé sur service_name
-    client
-        .post(format!("{}/rest/v1/services", supabase_url))
-        .header("apikey", &service_key)
+    let response = client
+        .post(format!("{}/functions/v1/jellysetup-api", supabase_url))
         .header("Authorization", format!("Bearer {}", service_key))
         .header("Content-Type", "application/json")
-        .header("Content-Profile", &schema_name)
-        .header("Prefer", "resolution=merge-duplicates")
         .json(&body)
         .send()
         .await?;
+
+    if !response.status().is_success() {
+        println!("[Supabase] Warning saving service: {}", response.text().await.unwrap_or_default());
+    }
 
     Ok(())
 }

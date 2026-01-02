@@ -4,9 +4,14 @@ use russh_keys::*;
 use std::sync::Arc;
 use std::sync::Mutex;
 use once_cell::sync::Lazy;
+use tokio::sync::Mutex as TokioMutex;
 
 // Stockage temporaire du dernier fingerprint capturé
 static LAST_HOST_FINGERPRINT: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
+// Session SSH persistante globale
+static PERSISTENT_SESSION: Lazy<TokioMutex<Option<PersistentSession>>> =
+    Lazy::new(|| TokioMutex::new(None));
 
 struct Client {}
 
@@ -18,17 +23,137 @@ impl client::Handler for Client {
         self,
         server_public_key: &russh_keys::key::PublicKey,
     ) -> std::result::Result<(Self, bool), Self::Error> {
-        // Capturer le fingerprint SHA256 de la clé host
         let fingerprint = server_public_key.fingerprint();
-        println!("[SSH] Host fingerprint: {}", fingerprint);
 
-        // Stocker le fingerprint pour récupération ultérieure
         if let Ok(mut fp) = LAST_HOST_FINGERPRINT.lock() {
             *fp = Some(fingerprint);
         }
 
-        // Accepter toutes les clés (on vérifie/stocke le fingerprint dans Supabase)
         Ok((self, true))
+    }
+}
+
+/// Structure pour gérer une session SSH persistante
+struct PersistentSession {
+    host: String,
+    username: String,
+    password: String,
+    session: client::Handle<Client>,
+    command_count: u32,
+}
+
+impl PersistentSession {
+    /// Crée une nouvelle session persistante
+    async fn new(host: &str, username: &str, password: &str) -> Result<Self> {
+        println!("[SSH-PERSISTENT] Creating new persistent session to {}@{}", username, host);
+
+        let config = Arc::new(client::Config::default());
+
+        let mut session = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client::connect(config, (host, 22), Client {})
+        ).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(anyhow!("Connection failed: {}", e)),
+            Err(_) => return Err(anyhow!("Connection timeout")),
+        };
+
+        let auth_result = session.authenticate_password(username, password).await?;
+        if !auth_result {
+            return Err(anyhow!("Authentication failed"));
+        }
+
+        println!("[SSH-PERSISTENT] ✅ Session established and authenticated");
+
+        Ok(Self {
+            host: host.to_string(),
+            username: username.to_string(),
+            password: password.to_string(),
+            session,
+            command_count: 0,
+        })
+    }
+
+    /// Exécute une commande sur la session persistante
+    async fn exec(&mut self, command: &str) -> Result<String> {
+        self.command_count += 1;
+
+        // Log court pour les commandes
+        let cmd_preview = if command.len() > 60 {
+            format!("{}...", &command[..60])
+        } else {
+            command.to_string()
+        };
+        println!("[SSH-P #{}] {}", self.command_count, cmd_preview);
+
+        // Ouvrir un channel pour cette commande - timeout plus long
+        let mut channel = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.session.channel_open_session()
+        ).await {
+            Ok(Ok(ch)) => ch,
+            Ok(Err(e)) => {
+                println!("[SSH-P] Channel failed: {}", e);
+                return Err(anyhow!("Channel open failed: {}", e));
+            }
+            Err(_) => {
+                println!("[SSH-P] Channel timeout");
+                return Err(anyhow!("Channel open timeout"));
+            }
+        };
+
+        if let Err(e) = channel.exec(true, command).await {
+            return Err(anyhow!("Command exec failed: {}", e));
+        }
+
+        let mut output = String::new();
+
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                channel.wait()
+            ).await {
+                Ok(Some(ChannelMsg::Data { data })) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
+                }
+                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                    let stderr = String::from_utf8_lossy(&data);
+                    output.push_str("[stderr] ");
+                    output.push_str(&stderr);
+                }
+                Ok(Some(ChannelMsg::ExitStatus { .. })) => {
+                    // Continue pour recevoir EOF
+                }
+                Ok(Some(ChannelMsg::Eof)) => {
+                    break;
+                }
+                Ok(None) => {
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    println!("[SSH-P] Command timeout");
+                    break;
+                }
+            }
+        }
+
+        // Fermer proprement le channel
+        let _ = channel.eof().await;
+        let _ = channel.close().await;
+
+        // Attendre un peu pour que le channel se ferme complètement
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        Ok(output)
+    }
+
+    /// Vérifie si la session est valide
+    async fn is_alive(&mut self) -> bool {
+        match self.exec("echo ok").await {
+            Ok(out) => out.trim() == "ok",
+            Err(_) => false,
+        }
     }
 }
 
@@ -43,7 +168,6 @@ pub fn clear_known_hosts_for_ip(ip: &str) -> Result<()> {
 
     println!("[SSH] Clearing known_hosts entry for {}...", ip);
 
-    // ssh-keygen -R <ip>
     let output = Command::new("ssh-keygen")
         .args(["-R", ip])
         .output()?;
@@ -58,14 +182,74 @@ pub fn clear_known_hosts_for_ip(ip: &str) -> Result<()> {
     Ok(())
 }
 
+/// Initialise ou réutilise une session SSH persistante
+pub async fn init_persistent_session(host: &str, username: &str, password: &str) -> Result<()> {
+    let mut session_guard = PERSISTENT_SESSION.lock().await;
+
+    // Vérifier si on a déjà une session valide pour ce host
+    if let Some(ref mut existing) = *session_guard {
+        if existing.host == host && existing.username == username {
+            // Vérifier que la session est encore vivante
+            if existing.is_alive().await {
+                println!("[SSH-PERSISTENT] Reusing existing session ({} commands executed)", existing.command_count);
+                return Ok(());
+            } else {
+                println!("[SSH-PERSISTENT] Existing session is dead, recreating...");
+            }
+        } else {
+            println!("[SSH-PERSISTENT] Different host/user, creating new session");
+        }
+    }
+
+    // Créer une nouvelle session
+    let new_session = PersistentSession::new(host, username, password).await?;
+    *session_guard = Some(new_session);
+
+    Ok(())
+}
+
+/// Exécute une commande via la session persistante (avec password)
+pub async fn exec_persistent(command: &str) -> Result<String> {
+    let mut session_guard = PERSISTENT_SESSION.lock().await;
+
+    if let Some(ref mut session) = *session_guard {
+        match session.exec(command).await {
+            Ok(output) => return Ok(output),
+            Err(e) => {
+                println!("[SSH-PERSISTENT] Command failed, session might be dead: {}", e);
+                // La session est morte, on la supprime
+                *session_guard = None;
+                return Err(anyhow!("Session dead: {}", e));
+            }
+        }
+    }
+
+    Err(anyhow!("No persistent session available. Call init_persistent_session first."))
+}
+
+/// Ferme la session persistante
+pub async fn close_persistent_session() {
+    let mut session_guard = PERSISTENT_SESSION.lock().await;
+    if session_guard.is_some() {
+        println!("[SSH-PERSISTENT] Closing persistent session");
+        *session_guard = None;
+    }
+}
+
 /// Teste la connexion SSH avec clé privée
 pub async fn test_connection(host: &str, username: &str, private_key: &str) -> Result<bool> {
-    let config = client::Config::default();
-    let config = Arc::new(config);
+    let config = Arc::new(client::Config::default());
 
     let key = russh_keys::decode_secret_key(private_key, None)?;
 
-    let mut session = client::connect(config, (host, 22), Client {}).await?;
+    let mut session = match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        client::connect(config, (host, 22), Client {})
+    ).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return Err(anyhow!("Connection failed: {}", e)),
+        Err(_) => return Err(anyhow!("Connection timeout after 15s")),
+    };
 
     let auth_result = session
         .authenticate_publickey(username, Arc::new(key))
@@ -80,23 +264,31 @@ pub async fn test_connection(host: &str, username: &str, private_key: &str) -> R
 pub async fn test_connection_password(host: &str, username: &str, password: &str) -> Result<bool> {
     println!("[SSH] Connecting to {}@{}...", username, host);
 
-    // Retry logic pour gérer "No route to host" transitoire
     let mut session = None;
     let mut last_error = None;
 
     for attempt in 1..=3 {
-        let config = client::Config::default();
-        let config = Arc::new(config);
+        let config = Arc::new(client::Config::default());
 
-        match client::connect(config, (host, 22), Client {}).await {
-            Ok(s) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client::connect(config, (host, 22), Client {})
+        ).await {
+            Ok(Ok(s)) => {
                 println!("[SSH] test_connection: connected (attempt {})", attempt);
                 session = Some(s);
                 break;
             }
-            Err(e) => {
-                println!("[SSH] test_connection: failed (attempt {}): {}", attempt, e);
-                last_error = Some(e);
+            Ok(Err(e)) => {
+                println!("[SSH] test_connection: connection failed (attempt {}): {}", attempt, e);
+                last_error = Some(anyhow!("{}", e));
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+            Err(_) => {
+                println!("[SSH] test_connection: timeout (attempt {})", attempt);
+                last_error = Some(anyhow!("Connection timeout after 15s"));
                 if attempt < 3 {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -138,23 +330,31 @@ pub async fn execute_command(
 ) -> Result<String> {
     let key = russh_keys::decode_secret_key(private_key, None)?;
 
-    // Retry logic pour gérer "No route to host" transitoire
     let mut session = None;
     let mut last_error = None;
 
     for attempt in 1..=3 {
-        let config = client::Config::default();
-        let config = Arc::new(config);
+        let config = Arc::new(client::Config::default());
 
-        match client::connect(config, (host, 22), Client {}).await {
-            Ok(s) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client::connect(config, (host, 22), Client {})
+        ).await {
+            Ok(Ok(s)) => {
                 println!("[SSH] execute_command: connected (attempt {})", attempt);
                 session = Some(s);
                 break;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 println!("[SSH] execute_command: connection failed (attempt {}): {}", attempt, e);
-                last_error = Some(e);
+                last_error = Some(anyhow!("{}", e));
+                if attempt < 3 {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+            Err(_) => {
+                println!("[SSH] execute_command: timeout (attempt {})", attempt);
+                last_error = Some(anyhow!("Connection timeout after 15s"));
                 if attempt < 3 {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
@@ -181,34 +381,84 @@ pub async fn execute_command(
 }
 
 /// Exécute une commande SSH et retourne la sortie (mot de passe)
+/// Utilise la session persistante si disponible, sinon en crée une nouvelle
 pub async fn execute_command_password(
     host: &str,
     username: &str,
     password: &str,
     command: &str,
 ) -> Result<String> {
+    // Essayer d'utiliser la session persistante si disponible
+    {
+        let mut session_guard = PERSISTENT_SESSION.lock().await;
+        if let Some(ref mut session) = *session_guard {
+            if session.host == host && session.username == username {
+                // Timeout de 60s pour les commandes via session persistante
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    session.exec(command)
+                ).await {
+                    Ok(Ok(output)) => return Ok(output),
+                    Ok(Err(e)) => {
+                        println!("[SSH] Persistent session command failed: {}", e);
+                        // Réinitialiser la session
+                        *session_guard = None;
+                    }
+                    Err(_) => {
+                        println!("[SSH] Persistent session timeout, reconnecting...");
+                        *session_guard = None;
+                    }
+                }
+
+                // Essayer de reconnecter automatiquement
+                drop(session_guard);
+                if let Ok(()) = init_persistent_session(host, username, password).await {
+                    // Réessayer avec la nouvelle session
+                    let mut session_guard = PERSISTENT_SESSION.lock().await;
+                    if let Some(ref mut session) = *session_guard {
+                        match session.exec(command).await {
+                            Ok(output) => return Ok(output),
+                            Err(e) => {
+                                println!("[SSH] Reconnected session also failed: {}", e);
+                                *session_guard = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: créer une nouvelle connexion
     println!("[SSH] exec_password: connecting to {}@{}", username, host);
     println!("[SSH] Command: {}", &command[..command.len().min(100)]);
 
-    // Retry logic pour gérer "No route to host" transitoire
     let mut session = None;
     let mut last_error = None;
 
     for attempt in 1..=3 {
-        let config = client::Config::default();
-        let config = Arc::new(config);
+        let config = Arc::new(client::Config::default());
 
-        match client::connect(config, (host, 22), Client {}).await {
-            Ok(s) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            client::connect(config, (host, 22), Client {})
+        ).await {
+            Ok(Ok(s)) => {
                 println!("[SSH] exec_password: connected (attempt {})", attempt);
                 session = Some(s);
                 break;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 println!("[SSH] exec_password: connection failed (attempt {}): {}", attempt, e);
-                last_error = Some(e);
+                last_error = Some(anyhow!("{}", e));
                 if attempt < 3 {
-                    // Attendre 2 secondes avant de réessayer
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+            Err(_) => {
+                println!("[SSH] exec_password: timeout (attempt {})", attempt);
+                last_error = Some(anyhow!("Connection timeout after 15s"));
+                if attempt < 3 {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
@@ -218,7 +468,7 @@ pub async fn execute_command_password(
     let mut session = match session {
         Some(s) => s,
         None => {
-            return Err(anyhow!("Connection failed after 3 attempts: {}", last_error.unwrap()));
+            return Err(anyhow!("Connection failed after 3 attempts: {:?}", last_error));
         }
     };
 
@@ -245,35 +495,72 @@ async fn execute_on_session(
     session: &mut client::Handle<Client>,
     command: &str,
 ) -> Result<String> {
-    let mut channel = session.channel_open_session().await?;
+    println!("[SSH] Opening channel...");
+    let mut channel = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        session.channel_open_session()
+    ).await {
+        Ok(Ok(ch)) => ch,
+        Ok(Err(e)) => return Err(anyhow!("Channel open failed: {}", e)),
+        Err(_) => return Err(anyhow!("Channel open timeout after 30s")),
+    };
 
-    channel.exec(true, command).await?;
+    println!("[SSH] Executing command...");
+    if let Err(e) = channel.exec(true, command).await {
+        return Err(anyhow!("Command exec failed: {}", e));
+    }
 
     let mut output = String::new();
 
-    loop {
-        match channel.wait().await {
-            Some(ChannelMsg::Data { data }) => {
-                output.push_str(&String::from_utf8_lossy(&data));
-            }
-            Some(ChannelMsg::ExtendedData { data, .. }) => {
-                output.push_str(&String::from_utf8_lossy(&data));
-            }
-            Some(ChannelMsg::ExitStatus { exit_status }) => {
-                if exit_status != 0 {
-                    tracing::warn!("Command exited with status {}: {}", exit_status, output);
+    let read_future = async {
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                channel.wait()
+            ).await {
+                Ok(Some(ChannelMsg::Data { data })) => {
+                    output.push_str(&String::from_utf8_lossy(&data));
                 }
-                break;
+                Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                    let stderr = String::from_utf8_lossy(&data);
+                    output.push_str("[stderr] ");
+                    output.push_str(&stderr);
+                }
+                Ok(Some(ChannelMsg::ExitStatus { exit_status })) => {
+                    println!("[SSH] Exit status: {}", exit_status);
+                    if exit_status != 0 {
+                        tracing::warn!("Command exited with status {}: {}", exit_status, output);
+                    }
+                    break;
+                }
+                Ok(Some(ChannelMsg::Eof)) => {
+                    println!("[SSH] Got EOF");
+                    break;
+                }
+                Ok(None) => {
+                    println!("[SSH] Channel closed");
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    println!("[SSH] Read timeout, returning partial output");
+                    break;
+                }
             }
-            Some(ChannelMsg::Eof) => break,
-            None => break,
-            _ => {}
         }
+    };
+
+    if tokio::time::timeout(std::time::Duration::from_secs(300), read_future).await.is_err() {
+        println!("[SSH] Global command timeout (5min)");
     }
 
-    channel.eof().await?;
-    session.disconnect(Disconnect::ByApplication, "", "").await?;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), channel.eof()).await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        session.disconnect(Disconnect::ByApplication, "", "")
+    ).await;
 
+    println!("[SSH] Command done, output length: {}", output.len());
     Ok(output)
 }
 
@@ -302,7 +589,6 @@ pub async fn upload_file(
     local_content: &str,
     remote_path: &str,
 ) -> Result<()> {
-    // Pour l'instant, on utilise une commande SSH avec cat
     let escaped_content = local_content.replace("'", "'\\''");
     let command = format!("cat > {} << 'JELLYSETUP_EOF'\n{}\nJELLYSETUP_EOF", remote_path, escaped_content);
 

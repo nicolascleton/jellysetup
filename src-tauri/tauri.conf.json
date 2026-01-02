@@ -7,7 +7,7 @@
     "distDir": "../dist"
   },
   "package": {
-    "productName": "JellySetup",
+    "productName": "EasyJelly",
     "version": "1.1.0"
   },
   "tauri": {
@@ -42,7 +42,7 @@
         "icons/icon.icns",
         "icons/icon.ico"
       ],
-      "identifier": "com.jellysetup.app",
+      "identifier": "com.easyjelly.app",
       "longDescription": "Application de configuration automatique pour Raspberry Pi Media Center avec Jellyfin, Radarr, Sonarr et plus.",
       "macOS": {
         "entitlements": "entitlements.plist",
@@ -76,7 +76,7 @@
         "fullscreen": false,
         "height": 700,
         "resizable": true,
-        "title": "JellySetup",
+        "title": "EasyJelly",
         "width": 900,
         "center": true,
         "minHeight": 600,

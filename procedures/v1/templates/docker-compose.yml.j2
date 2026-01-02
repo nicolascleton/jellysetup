@@ -127,6 +127,10 @@ services:
       - ./jellyseerr:/app/config
     environment:
       - TZ=Europe/Paris
+    depends_on:
+      - jellyfin
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # ===========================================================================
   # Bazarr - Subtitle manager

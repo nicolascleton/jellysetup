@@ -1,7 +1,7 @@
-use crate::{FlashConfig, FlashProgress, InstallConfig};
+use crate::{FlashConfig, FlashProgress, InstallConfig, JellyfinAuth};
 use anyhow::{anyhow, Result};
 use regex::Regex;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +13,19 @@ extern crate libc;
 
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
+
+/// Debug logging - écrit dans /tmp/jellysetup_debug.log
+fn debug_log(msg: &str) {
+    println!("{}", msg);
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/jellysetup_debug.log")
+    {
+        let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
+        let _ = writeln!(file, "[{}] {}", timestamp, msg);
+    }
+}
 
 // Protection contre les lancements multiples
 static FLASH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
@@ -950,6 +963,10 @@ services:
       - ./jellyseerr:/app/config
     environment:
       - TZ=Europe/Paris
+    depends_on:
+      - jellyfin
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   # Bazarr - Gestionnaire de sous-titres
   bazarr:
@@ -1191,20 +1208,21 @@ pub async fn run_full_installation(
                 let jellyfin_token = &token_rest[..token_end];
                 println!("[Config] Jellyfin authenticated, creating libraries...");
 
-                // Créer bibliothèque Films (format simplifié avec paths= dans l'URL)
+                // Créer bibliothèque Films avec LibraryOptions.PathInfos (OBLIGATOIRE pour avoir un ItemId!)
                 let movies_lib_cmd = format!(
-                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&paths=/mnt/decypharr/movies&refreshLibrary=false' -H 'X-Emby-Token: {}'",
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/decypharr/movies\"}}]}}}}'",
                     jellyfin_token
                 );
                 ssh::execute_command(host, username, private_key, &movies_lib_cmd).await.ok();
+                println!("[Config] Jellyfin: Movies library created");
 
-                // Créer bibliothèque Séries
+                // Créer bibliothèque Séries avec LibraryOptions.PathInfos
                 let tv_lib_cmd = format!(
-                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Series&collectionType=tvshows&paths=/mnt/decypharr/tv&refreshLibrary=false' -H 'X-Emby-Token: {}'",
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=S%C3%A9ries&collectionType=tvshows&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/decypharr/tv\"}}]}}}}'",
                     jellyfin_token
                 );
                 ssh::execute_command(host, username, private_key, &tv_lib_cmd).await.ok();
-                println!("[Config] Jellyfin: Libraries created");
+                println!("[Config] Jellyfin: TV library created");
             }
         }
     }
@@ -1215,6 +1233,7 @@ pub async fn run_full_installation(
         let ad_key = config.alldebrid_api_key.replace("\\", "\\\\").replace("\"", "\\\"");
 
         let decypharr_config = format!(r#"{{
+  "port": "8282",
   "qbit": {{
     "port": 8282,
     "username": "",
@@ -1270,7 +1289,7 @@ pub async fn run_full_installation(
         let radarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/downloadclient' \
             -H 'X-Api-Key: {}' \
             -H 'Content-Type: application/json' \
-            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "localhost"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "movieCategory", "value": "radarr"}}]}}'"#, radarr_api);
+            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "decypharr"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "movieCategory", "value": "radarr"}}]}}'"#, radarr_api);
         ssh::execute_command(host, username, private_key, &radarr_client_cmd).await.ok();
     }
 
@@ -1279,7 +1298,7 @@ pub async fn run_full_installation(
         let sonarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/downloadclient' \
             -H 'X-Api-Key: {}' \
             -H 'Content-Type: application/json' \
-            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "localhost"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "tvCategory", "value": "sonarr"}}]}}'"#, sonarr_api);
+            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "decypharr"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "tvCategory", "value": "sonarr"}}]}}'"#, sonarr_api);
         ssh::execute_command(host, username, private_key, &sonarr_client_cmd).await.ok();
     }
 
@@ -1377,7 +1396,118 @@ pub async fn run_full_installation(
         }
     }
 
-    println!("[Config] Note: Jellyseerr requires manual first-time setup at http://<pi-ip>:5055");
+    // 8.8: Configuration automatique de Jellyseerr via API
+    emit_progress(&window, "config", 96, "Configuration de Jellyseerr...", None);
+    println!("[Config] Jellyseerr: Starting automatic configuration...");
+
+    // Attendre que Jellyseerr soit prêt (max 60 sec)
+    let mut jellyseerr_ready = false;
+    for i in 0..12 {
+        let check = ssh::execute_command(host, username, private_key,
+            "curl -s -o /dev/null -w '%{http_code}' 'http://localhost:5055/api/v1/status' 2>/dev/null || echo '000'"
+        ).await.unwrap_or_default();
+
+        if check.trim() == "200" || check.trim() == "403" {
+            jellyseerr_ready = true;
+            println!("[Config] Jellyseerr: Service ready after {} seconds", (i + 1) * 5);
+            break;
+        }
+        println!("[Config] Jellyseerr: Waiting... (attempt {}/12)", i + 1);
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if jellyseerr_ready {
+        // Petite pause pour s'assurer que Jellyseerr est complètement prêt
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Étape 1: Authentifier avec Jellyfin et créer l'admin
+        // IMPORTANT: Échapper les caractères spéciaux pour JSON
+        let jf_user = config.jellyfin_username.replace("\\", "\\\\").replace("\"", "\\\"");
+        let jf_pass = config.jellyfin_password.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        // Essayer plusieurs hostnames jusqu'à ce qu'un fonctionne
+        // 1. host.docker.internal (avec extra_hosts configuré)
+        // 2. jellyfin (nom du service Docker sur le même réseau)
+        // 3. IP du Pi (passée en paramètre host)
+        let hostnames_to_try = vec![
+            "host.docker.internal".to_string(),
+            "jellyfin".to_string(),
+            host.to_string(),
+        ];
+
+        let mut auth_result = String::new();
+        for jellyfin_hostname in &hostnames_to_try {
+            println!("[Config] Jellyseerr: Trying hostname: {}", jellyfin_hostname);
+            // serverType: 2 = JELLYFIN (enum MediaServerType)
+            // urlBase: "" évite que JavaScript ajoute "undefined" à l'URL
+            let auth_cmd = format!(
+                r#"curl -s -X POST 'http://localhost:5055/api/v1/auth/jellyfin' \
+                   -H 'Content-Type: application/json' \
+                   -c /tmp/jellyseerr_cookies.txt \
+                   -d '{{"username":"{}","password":"{}","hostname":"{}","port":8096,"useSsl":false,"urlBase":"","serverType":2,"email":"admin@easyjelly.local"}}'"#,
+                jf_user, jf_pass, jellyfin_hostname
+            );
+            auth_result = ssh::execute_command(host, username, private_key, &auth_cmd).await.unwrap_or_default();
+            println!("[Config] Jellyseerr: Auth result with {}: {}", jellyfin_hostname, &auth_result[..std::cmp::min(200, auth_result.len())]);
+
+            if auth_result.contains("\"id\"") {
+                println!("[Config] Jellyseerr: Success with hostname: {}", jellyfin_hostname);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        // Vérifier si l'auth a réussi (contient "id" dans la réponse)
+        if auth_result.contains("\"id\"") {
+            println!("[Config] Jellyseerr: Admin user created successfully!");
+
+            // Étape 2: Sync des bibliothèques Jellyfin
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let sync_cmd = "curl -s -X GET 'http://localhost:5055/api/v1/settings/jellyfin/library?sync=true' -b /tmp/jellyseerr_cookies.txt";
+            let sync_result = ssh::execute_command(host, username, private_key, sync_cmd).await.unwrap_or_default();
+            println!("[Config] Jellyseerr: Library sync result: {}", &sync_result[..std::cmp::min(300, sync_result.len())]);
+
+            // Extraire les IDs des bibliothèques
+            let mut library_ids: Vec<String> = Vec::new();
+            let mut search_pos = 0;
+            while let Some(id_start) = sync_result[search_pos..].find("\"id\":\"") {
+                let actual_start = search_pos + id_start + 6;
+                if let Some(id_end) = sync_result[actual_start..].find("\"") {
+                    let lib_id = &sync_result[actual_start..actual_start + id_end];
+                    library_ids.push(lib_id.to_string());
+                    search_pos = actual_start + id_end;
+                } else {
+                    break;
+                }
+            }
+
+            // Étape 3: Activer toutes les bibliothèques trouvées
+            if !library_ids.is_empty() {
+                let ids_str = library_ids.join(",");
+                let enable_cmd = format!(
+                    "curl -s -X GET 'http://localhost:5055/api/v1/settings/jellyfin/library?enable={}' -b /tmp/jellyseerr_cookies.txt",
+                    ids_str
+                );
+                ssh::execute_command(host, username, private_key, &enable_cmd).await.ok();
+                println!("[Config] Jellyseerr: Enabled {} libraries: {}", library_ids.len(), ids_str);
+            }
+
+            // Étape 4: Finaliser le setup
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let init_cmd = "curl -s -X POST 'http://localhost:5055/api/v1/settings/initialize' -b /tmp/jellyseerr_cookies.txt -H 'Content-Type: application/json'";
+            let init_result = ssh::execute_command(host, username, private_key, init_cmd).await.unwrap_or_default();
+            println!("[Config] Jellyseerr: Initialize result: {}", init_result);
+
+            // Nettoyer les cookies
+            ssh::execute_command(host, username, private_key, "rm -f /tmp/jellyseerr_cookies.txt").await.ok();
+
+            println!("[Config] Jellyseerr: Configuration completed successfully!");
+        } else {
+            println!("[Config] Jellyseerr: Auth failed, manual setup required at http://<pi-ip>:5055");
+        }
+    } else {
+        println!("[Config] Jellyseerr: Service not ready after 60 seconds, manual setup required");
+    }
 
     ssh::execute_command(host, username, private_key,
         "echo \"$(date): Service configuration completed\" >> ~/jellysetup-logs/install.log"
@@ -1410,7 +1540,10 @@ pub async fn run_full_installation(
                 Some(&config.alldebrid_api_key),
                 config.ygg_passkey.as_deref(),
                 config.cloudflare_token.as_deref(),
-                None,
+                None, // jellyfin_api_key
+                None, // radarr_api_key
+                None, // sonarr_api_key
+                None, // prowlarr_api_key
             ).await {
                 println!("[Supabase] Warning: could not save Pi config: {}", e);
             }
@@ -1433,6 +1566,11 @@ pub async fn run_full_installation(
 
 /// Émet un événement de progression vers le frontend
 fn emit_progress(window: &Window, step: &str, percent: u32, message: &str, speed: Option<&str>) {
+    emit_progress_with_auth(window, step, percent, message, speed, None);
+}
+
+/// Émet un événement de progression avec données d'authentification Jellyfin optionnelles
+fn emit_progress_with_auth(window: &Window, step: &str, percent: u32, message: &str, speed: Option<&str>, jellyfin_auth: Option<JellyfinAuth>) {
     let _ = window.emit(
         "flash-progress",
         FlashProgress {
@@ -1440,6 +1578,7 @@ fn emit_progress(window: &Window, step: &str, percent: u32, message: &str, speed
             percent,
             message: message.to_string(),
             speed: speed.map(String::from),
+            jellyfin_auth,
         },
     );
 }
@@ -1496,6 +1635,15 @@ pub async fn run_full_installation_password(
         Err(e) => {
             return Err(anyhow::anyhow!("Connexion SSH impossible: {}", e));
         }
+    }
+
+    // INITIALISER LA SESSION SSH PERSISTANTE pour toutes les commandes suivantes
+    // Cela évite de reconnecter à chaque commande et accélère énormément l'installation
+    if let Err(e) = ssh::init_persistent_session(host, username, password).await {
+        println!("[Install] Warning: could not init persistent SSH session: {}", e);
+        // On continue quand même, les commandes utiliseront des connexions individuelles
+    } else {
+        println!("[Install] ✅ Persistent SSH session initialized - all commands will be faster!");
     }
 
     // Récupérer le vrai hostname du Pi via SSH (important pour les connexions par IP)
@@ -1687,7 +1835,7 @@ pub async fn run_full_installation_password(
     emit_progress(&window, "docker", 14, "Attente fin des mises à jour...", None);
     for wait_i in 0..60 {  // Max 5 minutes
         let apt_free = ssh::execute_command_password(host, username, password,
-            "! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null && echo FREE || echo LOCKED"
+            "timeout 5 fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null; RC=$?; if [ $RC -eq 1 ] || [ $RC -eq 124 ]; then echo FREE; else echo LOCKED; fi"
         ).await.unwrap_or_default();
 
         if apt_free.contains("FREE") {
@@ -1712,6 +1860,8 @@ pub async fn run_full_installation_password(
     let docker_output = docker_check.as_ref().map(|s| s.as_str()).unwrap_or("");
     let docker_installed = docker_check.is_ok() && docker_output.contains("Docker");
     println!("[Install] Docker installed: {}, output: '{}'", docker_installed, docker_output.trim());
+
+    let mut needs_reboot = false;
 
     if !docker_installed {
         // Logger l'action
@@ -1740,42 +1890,67 @@ pub async fn run_full_installation_password(
                 return Err(anyhow!(error_msg));
             }
         }
+        // Docker vient d'être installé, on doit rebooter pour le groupe docker
+        needs_reboot = true;
     } else {
         println!("[Install] Docker already installed, skipping");
         ssh::execute_command_password(host, username, password,
             "echo \"$(date): Docker already installed\" >> ~/jellysetup-logs/install.log"
         ).await.ok();
-    }
 
-    // Étape 3: Redémarrage pour appliquer groupe docker
-    println!("[Install] ========== REBOOT ==========");
-    emit_progress(&window, "reboot", 30, "Redémarrage...", None);
-    ssh::execute_command_password(host, username, password,
-        "echo \"$(date): Rebooting to apply docker group...\" >> ~/jellysetup-logs/install.log"
-    ).await.ok();
-    let reboot_cmd = format!("echo '{}' | sudo -S reboot", password);
-    ssh::execute_command_password(host, username, password, &reboot_cmd).await.ok();
-    println!("[Install] Reboot command sent, waiting 45s...");
-    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+        // Vérifier si l'utilisateur peut utiliser docker sans sudo (groupe docker appliqué)
+        let docker_test = ssh::execute_command_password(host, username, password,
+            "docker ps 2>&1"
+        ).await;
 
-    // Attendre que le Pi soit de nouveau accessible
-    println!("[Install] Waiting for Pi to come back online...");
-    let mut pi_back = false;
-    for i in 0..30 {
-        match ssh::execute_command_password(host, username, password, "echo ok").await {
-            Ok(_) => {
-                println!("[Install] Pi is back online after {} attempts", i + 1);
-                pi_back = true;
-                break;
+        if let Ok(output) = &docker_test {
+            if output.contains("permission denied") || output.contains("Cannot connect") {
+                println!("[Install] User not in docker group yet, reboot needed");
+                needs_reboot = true;
+            } else {
+                println!("[Install] Docker works without sudo, no reboot needed");
+                needs_reboot = false;
             }
-            Err(e) => {
-                println!("[Install] Pi not yet responding (attempt {}/30): {}", i + 1, e);
-            }
+        } else {
+            println!("[Install] Docker test failed, reboot to be safe");
+            needs_reboot = true;
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
-    if !pi_back {
-        return Err(anyhow!("Pi not responding after reboot (30 attempts)"));
+
+    // Étape 3: Redémarrage pour appliquer groupe docker (seulement si nécessaire)
+    if needs_reboot {
+        println!("[Install] ========== REBOOT ==========");
+        emit_progress(&window, "reboot", 30, "Redémarrage...", None);
+        ssh::execute_command_password(host, username, password,
+            "echo \"$(date): Rebooting to apply docker group...\" >> ~/jellysetup-logs/install.log"
+        ).await.ok();
+        let reboot_cmd = format!("echo '{}' | sudo -S reboot", password);
+        ssh::execute_command_password(host, username, password, &reboot_cmd).await.ok();
+        println!("[Install] Reboot command sent, waiting 45s...");
+        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+
+        // Attendre que le Pi soit de nouveau accessible
+        println!("[Install] Waiting for Pi to come back online...");
+        let mut pi_back = false;
+        for i in 0..30 {
+            match ssh::execute_command_password(host, username, password, "echo ok").await {
+                Ok(_) => {
+                    println!("[Install] Pi is back online after {} attempts", i + 1);
+                    pi_back = true;
+                    break;
+                }
+                Err(e) => {
+                    println!("[Install] Pi not yet responding (attempt {}/30): {}", i + 1, e);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+        if !pi_back {
+            return Err(anyhow!("Pi not responding after reboot (30 attempts)"));
+        }
+    } else {
+        println!("[Install] Skipping reboot - Docker already working");
+        emit_progress(&window, "reboot", 30, "Reboot non nécessaire", None);
     }
 
     // Vérifier que Docker est bien installé après le reboot
@@ -1798,7 +1973,7 @@ pub async fn run_full_installation_password(
         // IMPORTANT: Attendre que APT soit libre avant 2ème tentative
         for wait_i in 0..60 {
             let apt_free = ssh::execute_command_password(host, username, password,
-                "! fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null && echo FREE || echo LOCKED"
+                "timeout 5 fuser /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock 2>/dev/null; RC=$?; if [ $RC -eq 1 ] || [ $RC -eq 124 ]; then echo FREE; else echo LOCKED; fi"
             ).await.unwrap_or_default();
             if apt_free.contains("FREE") {
                 println!("[Install] APT is free for Docker retry");
@@ -2100,137 +2275,279 @@ pub async fn run_full_installation_password(
     // Étape 8: Configuration des services via API
     emit_progress(&window, "config", 85, "Configuration des services...", None);
 
-    // 8.1: Attendre que Jellyfin soit prêt (max 2 min)
-    emit_progress(&window, "config", 86, "Attente de Jellyfin...", None);
+    // 8.1: Reset Jellyfin MAIS préserver le ServerId pour éviter "Incompatibilité du serveur"
+    emit_progress(&window, "config", 86, "Reset Jellyfin pour config propre...", None);
+    debug_log("[JELLYFIN] === Reset de Jellyfin avec préservation ServerId ===");
+
+    // 1. Sauvegarder TOUS les fichiers d'identité serveur
+    // Le ServerId peut être dans device.txt, deviceid, ou system.xml selon la version
+    let backup_cmd = ssh::execute_command_password(host, username, password,
+        "cd ~/media-stack && mkdir -p /tmp/jellyfin-backup && \
+         find jellyfin -name 'device*' -type f -exec cp {} /tmp/jellyfin-backup/ \\; 2>/dev/null || true && \
+         find jellyfin -name 'system.xml' -type f -exec cp {} /tmp/jellyfin-backup/ \\; 2>/dev/null || true && \
+         find jellyfin -name 'network.xml' -type f -exec cp {} /tmp/jellyfin-backup/ \\; 2>/dev/null || true && \
+         echo 'Backed up:' && ls -la /tmp/jellyfin-backup/ 2>/dev/null || echo 'No files found'"
+    ).await.unwrap_or_default();
+    debug_log(&format!("[JELLYFIN] Backup result: {}", backup_cmd));
+
+    // 2. Reset Jellyfin: stop, delete, clean
+    let reset_cmds = vec![
+        "cd ~/media-stack && docker compose stop jellyfin",
+        "cd ~/media-stack && docker compose rm -f jellyfin",
+        "cd ~/media-stack && rm -rf jellyfin/*",
+    ];
+    for cmd in &reset_cmds {
+        debug_log(&format!("[JELLYFIN] Executing: {}", cmd));
+        ssh::execute_command_password(host, username, password, cmd).await.ok();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+
+    // 3. Restaurer les fichiers d'identité serveur AVANT de démarrer Jellyfin
+    let restore_result = ssh::execute_command_password(host, username, password,
+        "cd ~/media-stack && \
+         mkdir -p jellyfin/data jellyfin/config && \
+         for f in /tmp/jellyfin-backup/device*; do \
+           [ -f \"$f\" ] && cp -f \"$f\" jellyfin/data/ && echo \"Restored $(basename $f) to data/\"; \
+         done 2>/dev/null || true && \
+         [ -f /tmp/jellyfin-backup/system.xml ] && cp -f /tmp/jellyfin-backup/system.xml jellyfin/config/ && echo 'system.xml restored' || true && \
+         [ -f /tmp/jellyfin-backup/network.xml ] && cp -f /tmp/jellyfin-backup/network.xml jellyfin/config/ && echo 'network.xml restored' || true && \
+         echo 'Restored files:' && ls -la jellyfin/data/ jellyfin/config/ 2>/dev/null && \
+         rm -rf /tmp/jellyfin-backup"
+    ).await.unwrap_or_default();
+    debug_log(&format!("[JELLYFIN] Restore result: {}", restore_result));
+
+    // 4. Démarrer Jellyfin avec les fichiers d'identité restaurés
+    debug_log("[JELLYFIN] Starting Jellyfin with restored identity files...");
+    ssh::execute_command_password(host, username, password,
+        "cd ~/media-stack && docker compose up -d jellyfin"
+    ).await.ok();
+
+    // Attendre que Jellyfin soit prêt après le reset (max 90 sec)
+    debug_log("[JELLYFIN] Attente de Jellyfin après reset...");
+    emit_progress(&window, "config", 87, "Attente de Jellyfin...", None);
+
     let mut jellyfin_ready = false;
-    for i in 0..24 {
+    for i in 0..18 {
         let check = ssh::execute_command_password(host, username, password,
-            "curl -s -o /dev/null -w '%{http_code}' http://localhost:8096/health 2>/dev/null || echo 000"
+            "curl -s 'http://localhost:8096/System/Info/Public' 2>/dev/null || echo 'CURL_ERROR'"
         ).await.unwrap_or_default();
-        if check.trim() == "200" {
+
+        debug_log(&format!("[JELLYFIN] Check {}/18: {}", i + 1, &check[..std::cmp::min(150, check.len())]));
+
+        if check.contains("ServerName") && check.contains("\"StartupWizardCompleted\":false") {
             jellyfin_ready = true;
-            println!("[Config] Jellyfin is ready");
+            debug_log(&format!("[JELLYFIN] Jellyfin prêt, wizard NON complété ({})", i + 1));
             break;
         }
-        println!("[Config] Waiting for Jellyfin ({}/24)...", i + 1);
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 
+    if !jellyfin_ready {
+        debug_log("[JELLYFIN] ERREUR: Jellyfin non disponible après 90 sec!");
+    }
+
+    // Variable pour stocker les infos d'auth Jellyfin (pour auto-login frontend)
+    let mut final_jellyfin_auth: Option<JellyfinAuth> = None;
+
     if jellyfin_ready {
-        // 8.2: Configurer Jellyfin via l'API Startup (compatible Jellyfin 10.11.x)
-        emit_progress(&window, "config", 87, "Configuration Jellyfin...", None);
+        emit_progress(&window, "config", 88, "Configuration Jellyfin...", None);
 
         // Échapper les caractères spéciaux pour JSON
         let jf_user = config.jellyfin_username.replace("\\", "\\\\").replace("\"", "\\\"");
         let jf_pass = config.jellyfin_password.replace("\\", "\\\\").replace("\"", "\\\"");
+        debug_log(&format!("[JELLYFIN] User: {}, Pass: [{}chars]", jf_user, jf_pass.len()));
 
-        // Étape 1: Initialiser l'utilisateur (GET /Startup/FirstUser créé l'utilisateur par défaut)
-        // En Jellyfin 10.11.x, il faut GET FirstUser avant de pouvoir POST User
-        let first_user_cmd = "curl -s 'http://localhost:8096/Startup/FirstUser'";
-        let first_user_result = ssh::execute_command_password(host, username, password, first_user_cmd).await.unwrap_or_default();
-        println!("[Config] Jellyfin FirstUser: {}", first_user_result);
+        // Configuration COMPLÈTE du wizard - ORDRE CORRECT selon gist officiel:
+        // 1. Configuration, 2. GET User, 3. POST User, 4. RemoteAccess, 5. Complete
+        debug_log("[JELLYFIN] Configuration du wizard startup...");
 
-        // Petite pause pour laisser Jellyfin créer l'utilisateur
+        // Étape 1: Configuration langue/pays ET nom du serveur EN PREMIER
+        let jf_server_name = config.jellyfin_server_name.replace("\\", "\\\\").replace("\"", "\\\"");
+        let startup_config_json = format!(
+            r#"{{"UICulture":"fr","MetadataCountryCode":"FR","PreferredMetadataLanguage":"fr","ServerName":"{}"}}"#,
+            jf_server_name
+        );
+        let startup_config_cmd = format!(
+            "curl -s -X POST 'http://localhost:8096/Startup/Configuration' -H 'Content-Type: application/json' -d '{}'",
+            startup_config_json
+        );
+        let config_result = ssh::execute_command_password(host, username, password, &startup_config_cmd).await.unwrap_or_default();
+        debug_log(&format!("[JELLYFIN] 1. Startup/Configuration (ServerName={}): [{}]", jf_server_name, config_result));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        // Étape 2: GET /Startup/User pour initialiser l'état
+        let get_user_cmd = "curl -s 'http://localhost:8096/Startup/User'";
+        let get_user_result = ssh::execute_command_password(host, username, password, get_user_cmd).await.unwrap_or_default();
+        debug_log(&format!("[JELLYFIN] 2. GET Startup/User: [{}]", get_user_result));
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        // Étape 2: Configuration initiale (langue, métadonnées)
-        let startup_config_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/Configuration' \
-            -H 'Content-Type: application/json' \
-            -d '{"UICulture":"fr","MetadataCountryCode":"FR","PreferredMetadataLanguage":"fr"}'"#;
-        ssh::execute_command_password(host, username, password, startup_config_cmd).await.ok();
-
-        // Étape 3: Mettre à jour l'utilisateur admin (POST /Startup/User)
-        let startup_user_cmd = format!(
-            r#"curl -s -X POST 'http://localhost:8096/Startup/User' \
-            -H 'Content-Type: application/json' \
-            -d '{{"Name":"{}","Password":"{}"}}'  "#,
+        // Étape 3: POST /Startup/User pour créer l'utilisateur
+        let write_json_cmd = format!(
+            r#"echo '{{"Name":"{}","Password":"{}"}}' > /tmp/jf_user.json"#,
             jf_user, jf_pass
         );
-        let user_result = ssh::execute_command_password(host, username, password, &startup_user_cmd).await;
-        match &user_result {
-            Ok(r) => println!("[Config] Jellyfin user updated: {}", r),
-            Err(e) => println!("[Config] Jellyfin user update warning: {}", e),
-        }
+        ssh::execute_command_password(host, username, password, &write_json_cmd).await.ok();
+        let create_user_cmd = "curl -s -X POST 'http://localhost:8096/Startup/User' -H 'Content-Type: application/json' -d @/tmp/jf_user.json";
+        debug_log(&format!("[JELLYFIN] 3. POST Startup/User: Creating {}", jf_user));
+        let user_result = ssh::execute_command_password(host, username, password, create_user_cmd).await.unwrap_or_default();
+        debug_log(&format!("[JELLYFIN] Startup/User result: [{}]", user_result));
+        ssh::execute_command_password(host, username, password, "rm -f /tmp/jf_user.json").await.ok();
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Étape 4: Activer l'accès distant
-        let remote_access_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/RemoteAccess' \
-            -H 'Content-Type: application/json' \
-            -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}'"#;
-        ssh::execute_command_password(host, username, password, remote_access_cmd).await.ok();
+        let remote_access_cmd = r#"curl -s -X POST 'http://localhost:8096/Startup/RemoteAccess' -H 'Content-Type: application/json' -d '{"EnableRemoteAccess":true,"EnableAutomaticPortMapping":false}'"#;
+        let remote_result = ssh::execute_command_password(host, username, password, remote_access_cmd).await.unwrap_or_default();
+        debug_log(&format!("[JELLYFIN] 4. Startup/RemoteAccess: [{}]", remote_result));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Étape 5: Compléter le wizard
         let complete_cmd = "curl -s -X POST 'http://localhost:8096/Startup/Complete'";
-        ssh::execute_command_password(host, username, password, complete_cmd).await.ok();
-        println!("[Config] Jellyfin setup wizard completed");
+        let complete_result = ssh::execute_command_password(host, username, password, complete_cmd).await.unwrap_or_default();
+        debug_log(&format!("[JELLYFIN] 5. Startup/Complete: [{}]", complete_result));
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        // Étape 5: S'authentifier pour obtenir un token et créer les bibliothèques
+        // Étape 6: Vérifier que le wizard est complété
+        let verify_result = ssh::execute_command_password(host, username, password,
+            "curl -s 'http://localhost:8096/System/Info/Public'"
+        ).await.unwrap_or_default();
+        if verify_result.contains("\"StartupWizardCompleted\":true") {
+            debug_log("[JELLYFIN] Wizard COMPLÉTÉ avec succès!");
+        } else {
+            debug_log(&format!("[JELLYFIN] ERREUR: Wizard pas complété! {}", &verify_result[..std::cmp::min(100, verify_result.len())]));
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            ssh::execute_command_password(host, username, password, "curl -s -X POST 'http://localhost:8096/Startup/Complete'").await.ok();
+        }
+
+        // Étape 6: S'authentifier pour obtenir un token et créer les bibliothèques
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        let auth_cmd = format!(r#"curl -s -X POST 'http://localhost:8096/Users/AuthenticateByName' \
-            -H 'Content-Type: application/json' \
-            -H 'X-Emby-Authorization: MediaBrowser Client="JellySetup", Device="RaspberryPi", DeviceId="jellysetup-install", Version="1.0.0"' \
-            -d '{{"Username":"{}","Pw":"{}"}}'"#, jf_user, jf_pass);
+        // Commande auth sur une seule ligne
+        let auth_cmd = format!(
+            "curl -s -X POST 'http://localhost:8096/Users/AuthenticateByName' -H 'Content-Type: application/json' -H 'X-Emby-Authorization: MediaBrowser Client=\"JellySetup\", Device=\"RaspberryPi\", DeviceId=\"jellysetup-install\", Version=\"1.0.0\"' -d '{{\"Username\":\"{}\",\"Pw\":\"{}\"}}'",
+            jf_user, jf_pass
+        );
+        debug_log(&format!("[JELLYFIN] Auth command: {}", &auth_cmd[..std::cmp::min(150, auth_cmd.len())]));
         let auth_result = ssh::execute_command_password(host, username, password, &auth_cmd).await.unwrap_or_default();
+        debug_log(&format!("[JELLYFIN] Auth result: {}", &auth_result[..std::cmp::min(200, auth_result.len())]));
 
-        // Extraire le token de la réponse JSON
+        // Extraire le token et UserId de la réponse JSON
+        let mut jellyfin_auth_data: Option<JellyfinAuth> = None;
+
         if let Some(token_start) = auth_result.find("\"AccessToken\":\"") {
             let token_rest = &auth_result[token_start + 15..];
             if let Some(token_end) = token_rest.find("\"") {
-                let jellyfin_token = &token_rest[..token_end];
+                let jellyfin_token = token_rest[..token_end].to_string();
                 println!("[Config] Jellyfin authenticated, creating libraries...");
 
-                // Créer la bibliothèque Films (format simplifié avec paths= dans l'URL)
-                let movies_lib_cmd = format!(
-                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&paths=/mnt/decypharr/movies&refreshLibrary=false' -H 'X-Emby-Token: {}'",
-                    jellyfin_token
-                );
-                ssh::execute_command_password(host, username, password, &movies_lib_cmd).await.ok();
-                println!("[Config] Jellyfin: Movies library created");
-
-                // Créer la bibliothèque Séries
-                let tv_lib_cmd = format!(
-                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Series&collectionType=tvshows&paths=/mnt/decypharr/tv&refreshLibrary=false' -H 'X-Emby-Token: {}'",
-                    jellyfin_token
-                );
-                ssh::execute_command_password(host, username, password, &tv_lib_cmd).await.ok();
-                println!("[Config] Jellyfin: TV Shows library created");
-
-                // Configurer Jellyfin en Français - Configuration serveur
-                let server_lang_cmd = format!(
-                    r#"curl -s -X POST 'http://localhost:8096/System/Configuration' \
-                       -H 'X-Emby-Token: {}' \
-                       -H 'Content-Type: application/json' \
-                       -d '{{"UICulture":"fr","PreferredMetadataLanguage":"fr","MetadataCountryCode":"FR"}}'"#,
-                    jellyfin_token
-                );
-                ssh::execute_command_password(host, username, password, &server_lang_cmd).await.ok();
-                println!("[Config] Jellyfin: Server configured in French");
-
-                // Récupérer l'ID utilisateur et configurer ses préférences en Français
-                let user_info_cmd = format!(
-                    "curl -s 'http://localhost:8096/Users/Me' -H 'X-Emby-Token: {}'",
-                    jellyfin_token
-                );
-                if let Ok(user_info) = ssh::execute_command_password(host, username, password, &user_info_cmd).await {
-                    if let Some(id_start) = user_info.find("\"Id\":\"") {
-                        let id_rest = &user_info[id_start + 6..];
+                // Extraire UserId de la réponse d'auth
+                let mut user_id_from_auth = String::new();
+                if let Some(user_start) = auth_result.find("\"User\":{") {
+                    let user_json = &auth_result[user_start..];
+                    if let Some(id_start) = user_json.find("\"Id\":\"") {
+                        let id_rest = &user_json[id_start + 6..];
                         if let Some(id_end) = id_rest.find("\"") {
-                            let user_id = &id_rest[..id_end];
-                            // Mettre à jour les préférences utilisateur en Français
-                            let user_config_cmd = format!(
-                                r#"curl -s -X POST 'http://localhost:8096/Users/{}/Configuration' \
-                                   -H 'X-Emby-Token: {}' \
-                                   -H 'Content-Type: application/json' \
-                                   -d '{{"SubtitleLanguagePreference":"fre","AudioLanguagePreference":"fra"}}'"#,
-                                user_id, jellyfin_token
-                            );
-                            ssh::execute_command_password(host, username, password, &user_config_cmd).await.ok();
-                            println!("[Config] Jellyfin: User preferences set to French");
+                            user_id_from_auth = id_rest[..id_end].to_string();
+                            debug_log(&format!("[JELLYFIN] UserId extracted: {}", user_id_from_auth));
                         }
                     }
                 }
+
+                // Récupérer le ServerId depuis /System/Info/Public
+                let server_info = ssh::execute_command_password(host, username, password,
+                    "curl -s 'http://localhost:8096/System/Info/Public'"
+                ).await.unwrap_or_default();
+                debug_log(&format!("[JELLYFIN] Server info: {}", &server_info[..std::cmp::min(200, server_info.len())]));
+
+                let mut server_id = String::new();
+                if let Some(sid_start) = server_info.find("\"Id\":\"") {
+                    let sid_rest = &server_info[sid_start + 6..];
+                    if let Some(sid_end) = sid_rest.find("\"") {
+                        server_id = sid_rest[..sid_end].to_string();
+                        println!("[Config] Jellyfin ServerId: {}", server_id);
+                    }
+                }
+
+                // Créer la bibliothèque Films avec LibraryOptions.PathInfos (format correct!)
+                // Le secret: il FAUT passer PathInfos dans le body JSON sinon la lib n'a pas d'ItemId
+                let movies_lib_cmd = format!(
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/decypharr/movies\"}}]}}}}'",
+                    jellyfin_token
+                );
+                let movies_result = ssh::execute_command_password(host, username, password, &movies_lib_cmd).await.unwrap_or_default();
+                debug_log(&format!("[JELLYFIN] Movies library result: {}", movies_result));
+                println!("[Config] Jellyfin: Movies library created");
+
+                // Créer la bibliothèque Séries avec LibraryOptions.PathInfos
+                let tv_lib_cmd = format!(
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=S%C3%A9ries&collectionType=tvshows&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/decypharr/tv\"}}]}}}}'",
+                    jellyfin_token
+                );
+                let tv_result = ssh::execute_command_password(host, username, password, &tv_lib_cmd).await.unwrap_or_default();
+                debug_log(&format!("[JELLYFIN] TV library result: {}", tv_result));
+                println!("[Config] Jellyfin: TV Shows library created");
+
+                // Vérifier que les bibliothèques ont bien un ItemId (sinon elles sont invisibles!)
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let libs_check = ssh::execute_command_password(host, username, password,
+                    &format!("curl -s 'http://localhost:8096/Library/VirtualFolders' -H 'X-Emby-Token: {}'", jellyfin_token)
+                ).await.unwrap_or_default();
+                debug_log(&format!("[JELLYFIN] Libraries check: {}", &libs_check[..std::cmp::min(500, libs_check.len())]));
+
+                // Vérifier que les deux libs ont un ItemId
+                let films_ok = libs_check.contains("Films") && libs_check.contains("\"ItemId\"");
+                let series_ok = libs_check.contains("ries") && libs_check.matches("\"ItemId\"").count() >= 2;
+                if films_ok && series_ok {
+                    println!("[Config] Jellyfin: Both libraries created with ItemId - SUCCESS!");
+                } else {
+                    println!("[Config] Jellyfin: Warning - libraries might not have ItemId: Films={}, Séries={}", films_ok, series_ok);
+                }
+
+                // Note: ServerName et langue déjà configurés via /Startup/Configuration
+                // NE PAS appeler /System/Configuration ici car ça reset IsStartupWizardCompleted !
+                println!("[Config] Jellyfin: Server already configured via Startup API");
+
+                // Configurer les préférences utilisateur en Français (langue UI + sous-titres + audio)
+                if !user_id_from_auth.is_empty() {
+                    let user_config_cmd = format!(
+                        "curl -s -X POST 'http://localhost:8096/Users/{}/Configuration' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"SubtitleLanguagePreference\":\"fre\",\"AudioLanguagePreference\":\"fra\"}}'",
+                        user_id_from_auth, jellyfin_token
+                    );
+                    ssh::execute_command_password(host, username, password, &user_config_cmd).await.ok();
+
+                    // Configurer aussi la langue d'affichage (DisplayLanguage) via User Policy
+                    let display_lang_cmd = format!(
+                        "curl -s -X POST 'http://localhost:8096/Users/{}/Policy' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"IsAdministrator\":true,\"EnableAllFolders\":true}}'",
+                        user_id_from_auth, jellyfin_token
+                    );
+                    ssh::execute_command_password(host, username, password, &display_lang_cmd).await.ok();
+
+                    // Forcer la langue française dans system.xml (au cas où le wizard l'aurait pas appliqué)
+                    let force_french_cmd = r#"cd ~/media-stack && \
+                        if [ -f jellyfin/config/system.xml ]; then \
+                            sed -i 's|<UICulture>[^<]*</UICulture>|<UICulture>fr</UICulture>|g' jellyfin/config/system.xml && \
+                            sed -i 's|<PreferredMetadataLanguage>[^<]*</PreferredMetadataLanguage>|<PreferredMetadataLanguage>fr</PreferredMetadataLanguage>|g' jellyfin/config/system.xml && \
+                            sed -i 's|<MetadataCountryCode>[^<]*</MetadataCountryCode>|<MetadataCountryCode>FR</MetadataCountryCode>|g' jellyfin/config/system.xml && \
+                            echo 'French language forced in system.xml'; \
+                        fi"#;
+                    ssh::execute_command_password(host, username, password, force_french_cmd).await.ok();
+                    println!("[Config] Jellyfin: User preferences set to French (UI + subtitles + audio)");
+                }
+
+                // Stocker les infos d'authentification pour le frontend
+                if !server_id.is_empty() && !user_id_from_auth.is_empty() {
+                    jellyfin_auth_data = Some(JellyfinAuth {
+                        server_id: server_id.clone(),
+                        access_token: jellyfin_token.clone(),
+                        user_id: user_id_from_auth.clone(),
+                    });
+                    println!("[Config] Jellyfin auth data saved for auto-login: ServerId={}, UserId={}", server_id, user_id_from_auth);
+                }
             }
         }
+
+        // Sauvegarder jellyfin_auth_data pour l'utiliser à la fin
+        // On le stocke dans une variable qui sera utilisée par emit_progress_with_auth
+        final_jellyfin_auth = jellyfin_auth_data;
     } else {
         // ERREUR CRITIQUE: Si Jellyfin n'est pas prêt après 2 min, c'est que l'installation a échoué !
         logger.log_error(
@@ -2268,6 +2585,7 @@ pub async fn run_full_installation_password(
 
         // Créer le config.json pour Decypharr
         let decypharr_config = format!(r#"{{
+  "port": "8282",
   "qbit": {{
     "port": 8282,
     "username": "",
@@ -2303,6 +2621,7 @@ pub async fn run_full_installation_password(
         ssh::execute_command_password(host, username, password,
             "docker restart decypharr"
         ).await.ok();
+        debug_log("[DECYPHARR] Config updated with port as string");
         println!("[Config] Decypharr configured with AllDebrid");
     }
 
@@ -2341,14 +2660,14 @@ pub async fn run_full_installation_password(
                 "enable": true,
                 "priority": 1,
                 "fields": [
-                    {{"name": "host", "value": "localhost"}},
+                    {{"name": "host", "value": "decypharr"}},
                     {{"name": "port", "value": 8282}},
                     {{"name": "useSsl", "value": false}},
                     {{"name": "movieCategory", "value": "radarr"}}
                 ]
             }}'"#, radarr_api);
-        ssh::execute_command_password(host, username, password, &radarr_client_cmd).await.ok();
-        println!("[Config] Radarr: Decypharr download client added");
+        let result = ssh::execute_command_password(host, username, password, &radarr_client_cmd).await;
+        println!("[Config] Radarr: Decypharr download client result: {:?}", result);
     }
 
     // Ajouter Decypharr comme client de téléchargement à Sonarr
@@ -2363,14 +2682,14 @@ pub async fn run_full_installation_password(
                 "enable": true,
                 "priority": 1,
                 "fields": [
-                    {{"name": "host", "value": "localhost"}},
+                    {{"name": "host", "value": "decypharr"}},
                     {{"name": "port", "value": 8282}},
                     {{"name": "useSsl", "value": false}},
                     {{"name": "tvCategory", "value": "sonarr"}}
                 ]
             }}'"#, sonarr_api);
-        ssh::execute_command_password(host, username, password, &sonarr_client_cmd).await.ok();
-        println!("[Config] Sonarr: Decypharr download client added");
+        let result = ssh::execute_command_password(host, username, password, &sonarr_client_cmd).await;
+        println!("[Config] Sonarr: Decypharr download client result: {:?}", result);
     }
 
     // 8.4b: Ajouter les Root Folders pour Radarr et Sonarr
@@ -2523,8 +2842,118 @@ pub async fn run_full_installation_password(
         }
     }
 
-    // 8.8: Note pour Jellyseerr - nécessite config manuelle au premier lancement
-    println!("[Config] Note: Jellyseerr requires manual first-time setup at http://<pi-ip>:5055");
+    // 8.8: Configuration automatique de Jellyseerr via API
+    emit_progress(&window, "config", 96, "Configuration de Jellyseerr...", None);
+    println!("[Config] Jellyseerr: Starting automatic configuration...");
+
+    // Attendre que Jellyseerr soit prêt (max 60 sec)
+    let mut jellyseerr_ready = false;
+    for i in 0..12 {
+        let check = ssh::execute_command_password(host, username, password,
+            "curl -s -o /dev/null -w '%{http_code}' 'http://localhost:5055/api/v1/status' 2>/dev/null || echo '000'"
+        ).await.unwrap_or_default();
+
+        if check.trim() == "200" || check.trim() == "403" {
+            jellyseerr_ready = true;
+            println!("[Config] Jellyseerr: Service ready after {} seconds", (i + 1) * 5);
+            break;
+        }
+        println!("[Config] Jellyseerr: Waiting... (attempt {}/12)", i + 1);
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if jellyseerr_ready {
+        // Petite pause pour s'assurer que Jellyseerr est complètement prêt
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // Étape 1: Authentifier avec Jellyfin et créer l'admin
+        // IMPORTANT: Échapper les caractères spéciaux pour JSON
+        let jf_user = config.jellyfin_username.replace("\\", "\\\\").replace("\"", "\\\"");
+        let jf_pass = config.jellyfin_password.replace("\\", "\\\\").replace("\"", "\\\"");
+
+        // Essayer plusieurs hostnames jusqu'à ce qu'un fonctionne
+        // 1. host.docker.internal (avec extra_hosts configuré)
+        // 2. jellyfin (nom du service Docker sur le même réseau)
+        // 3. IP du Pi (passée en paramètre host)
+        let hostnames_to_try = vec![
+            "host.docker.internal".to_string(),
+            "jellyfin".to_string(),
+            host.to_string(),
+        ];
+
+        let mut auth_result = String::new();
+        for jellyfin_hostname in &hostnames_to_try {
+            println!("[Config] Jellyseerr: Trying hostname: {}", jellyfin_hostname);
+            // serverType: 2 = JELLYFIN (enum MediaServerType)
+            // urlBase: "" évite que JavaScript ajoute "undefined" à l'URL
+            let auth_cmd = format!(
+                r#"curl -s -X POST 'http://localhost:5055/api/v1/auth/jellyfin' \
+                   -H 'Content-Type: application/json' \
+                   -c /tmp/jellyseerr_cookies.txt \
+                   -d '{{"username":"{}","password":"{}","hostname":"{}","port":8096,"useSsl":false,"urlBase":"","serverType":2,"email":"admin@easyjelly.local"}}'"#,
+                jf_user, jf_pass, jellyfin_hostname
+            );
+            auth_result = ssh::execute_command_password(host, username, password, &auth_cmd).await.unwrap_or_default();
+            println!("[Config] Jellyseerr: Auth result with {}: {}", jellyfin_hostname, &auth_result[..std::cmp::min(200, auth_result.len())]);
+
+            if auth_result.contains("\"id\"") {
+                println!("[Config] Jellyseerr: Success with hostname: {}", jellyfin_hostname);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        // Vérifier si l'auth a réussi (contient "id" dans la réponse)
+        if auth_result.contains("\"id\"") {
+            println!("[Config] Jellyseerr: Admin user created successfully!");
+
+            // Étape 2: Sync des bibliothèques Jellyfin
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let sync_cmd = "curl -s -X GET 'http://localhost:5055/api/v1/settings/jellyfin/library?sync=true' -b /tmp/jellyseerr_cookies.txt";
+            let sync_result = ssh::execute_command_password(host, username, password, sync_cmd).await.unwrap_or_default();
+            println!("[Config] Jellyseerr: Library sync result: {}", &sync_result[..std::cmp::min(300, sync_result.len())]);
+
+            // Extraire les IDs des bibliothèques (format: [{"id":"xxx","name":"Films",...}])
+            let mut library_ids: Vec<String> = Vec::new();
+            let mut search_pos = 0;
+            while let Some(id_start) = sync_result[search_pos..].find("\"id\":\"") {
+                let actual_start = search_pos + id_start + 6;
+                if let Some(id_end) = sync_result[actual_start..].find("\"") {
+                    let lib_id = &sync_result[actual_start..actual_start + id_end];
+                    library_ids.push(lib_id.to_string());
+                    search_pos = actual_start + id_end;
+                } else {
+                    break;
+                }
+            }
+
+            // Étape 3: Activer toutes les bibliothèques trouvées
+            if !library_ids.is_empty() {
+                let ids_str = library_ids.join(",");
+                let enable_cmd = format!(
+                    "curl -s -X GET 'http://localhost:5055/api/v1/settings/jellyfin/library?enable={}' -b /tmp/jellyseerr_cookies.txt",
+                    ids_str
+                );
+                ssh::execute_command_password(host, username, password, &enable_cmd).await.ok();
+                println!("[Config] Jellyseerr: Enabled {} libraries: {}", library_ids.len(), ids_str);
+            }
+
+            // Étape 4: Finaliser le setup
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let init_cmd = "curl -s -X POST 'http://localhost:5055/api/v1/settings/initialize' -b /tmp/jellyseerr_cookies.txt -H 'Content-Type: application/json'";
+            let init_result = ssh::execute_command_password(host, username, password, init_cmd).await.unwrap_or_default();
+            println!("[Config] Jellyseerr: Initialize result: {}", init_result);
+
+            // Nettoyer les cookies
+            ssh::execute_command_password(host, username, password, "rm -f /tmp/jellyseerr_cookies.txt").await.ok();
+
+            println!("[Config] Jellyseerr: Configuration completed successfully!");
+        } else {
+            println!("[Config] Jellyseerr: Auth failed, manual setup required at http://<pi-ip>:5055");
+        }
+    } else {
+        println!("[Config] Jellyseerr: Service not ready after 60 seconds, manual setup required");
+    }
 
     // Log la configuration effectuée
     ssh::execute_command_password(host, username, password,
@@ -2556,7 +2985,10 @@ pub async fn run_full_installation_password(
                 Some(&config.alldebrid_api_key),
                 config.ygg_passkey.as_deref(),
                 config.cloudflare_token.as_deref(),
-                None,
+                None, // jellyfin_api_key
+                None, // radarr_api_key
+                None, // sonarr_api_key
+                None, // prowlarr_api_key
             ).await {
                 println!("[Supabase] Warning: could not save Pi config: {}", e);
             }
@@ -2571,7 +3003,8 @@ pub async fn run_full_installation_password(
         }
     }
 
-    emit_progress(&window, "complete", 100, "Installation terminée !", None);
+    // Émettre l'événement de fin avec les données d'auth Jellyfin pour auto-login
+    emit_progress_with_auth(&window, "complete", 100, "Installation terminée !", None, final_jellyfin_auth);
 
     // Finaliser les logs et envoyer tout à Supabase
     logger.finalize(true).await;
@@ -2582,6 +3015,9 @@ pub async fn run_full_installation_password(
         println!("[Install] Stopping caffeinate...");
         let _ = process.kill();
     }
+
+    // Fermer la session SSH persistante
+    ssh::close_persistent_session().await;
 
     tracing::info!("Installation (password auth) completed successfully on {}", host);
     Ok(())

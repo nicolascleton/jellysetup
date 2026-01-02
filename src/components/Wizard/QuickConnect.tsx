@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { ArrowLeft, ArrowRight, Eye, EyeOff, Key, User, Monitor, Info, ExternalLink } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { ArrowLeft, ArrowRight, Eye, EyeOff, Key, User, Monitor, Info, ExternalLink, Mail, Server } from 'lucide-react';
 import { open } from '@tauri-apps/api/shell';
 import { Config } from '../../lib/store';
 
@@ -13,6 +13,35 @@ interface QuickConnectProps {
 export default function QuickConnect({ config, onConfigChange, onNext, onBack }: QuickConnectProps) {
   const [showSystemPassword, setShowSystemPassword] = useState(false);
   const [showJellyfinPassword, setShowJellyfinPassword] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [serverNameManuallyEdited, setServerNameManuallyEdited] = useState(false);
+  const previousHostname = useRef(config.hostname);
+
+  // Synchroniser le nom du serveur Jellyfin avec le hostname (sauf si édité manuellement)
+  useEffect(() => {
+    if (!serverNameManuallyEdited && config.hostname !== previousHostname.current) {
+      onConfigChange({ jellyfinServerName: config.hostname });
+    }
+    previousHostname.current = config.hostname;
+  }, [config.hostname, serverNameManuallyEdited, onConfigChange]);
+
+  const validate = (): boolean => {
+    const newErrors: Record<string, string> = {};
+    if (!config.systemUsername.trim()) newErrors.systemUsername = 'Requis';
+    if (!config.systemPassword.trim()) newErrors.systemPassword = 'Requis';
+    if (!config.alldebridKey.trim()) newErrors.alldebridKey = 'Requis';
+    if (!config.jellyfinUsername.trim()) newErrors.jellyfinUsername = 'Requis';
+    if (!config.jellyfinPassword.trim()) newErrors.jellyfinPassword = 'Requis';
+    if (!config.jellyfinServerName?.trim()) newErrors.jellyfinServerName = 'Requis';
+    if (!config.adminEmail?.trim()) newErrors.adminEmail = 'Requis';
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.adminEmail)) newErrors.adminEmail = 'Email invalide';
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
+
+  const handleNext = () => {
+    if (validate()) onNext();
+  };
 
   return (
     <div className="space-y-4">
@@ -30,7 +59,7 @@ export default function QuickConnect({ config, onConfigChange, onNext, onBack }:
         </div>
         <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
           <Info className="w-3 h-3" />
-          Les identifiants que vous avez configurés sur le Pi
+          Identifiants SSH pour se connecter au Raspberry Pi
         </p>
         <div className="grid grid-cols-3 gap-3">
           <div>
@@ -84,6 +113,10 @@ export default function QuickConnect({ config, onConfigChange, onNext, onBack }:
             Obtenir la clé <ExternalLink className="w-3 h-3" />
           </button>
         </div>
+        <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
+          <Info className="w-3 h-3" />
+          Service de débridage pour télécharger depuis les hébergeurs premium
+        </p>
         <input
           type="text"
           value={config.alldebridKey}
@@ -108,6 +141,10 @@ export default function QuickConnect({ config, onConfigChange, onNext, onBack }:
             Obtenir la passkey <ExternalLink className="w-3 h-3" />
           </button>
         </div>
+        <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
+          <Info className="w-3 h-3" />
+          Accès aux torrents YGGtorrent pour plus de contenus français
+        </p>
         <input
           type="text"
           value={config.yggPasskey || ''}
@@ -121,12 +158,33 @@ export default function QuickConnect({ config, onConfigChange, onNext, onBack }:
       <div className="card !p-4">
         <div className="flex items-center gap-2 mb-2">
           <User className="w-4 h-4 text-purple-400" />
-          <span className="font-medium text-white text-sm">Compte Jellyfin</span>
+          <span className="font-medium text-white text-sm">Jellyfin</span>
         </div>
         <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
           <Info className="w-3 h-3" />
-          Le compte sera créé automatiquement sur Jellyfin
+          Serveur média pour regarder vos films et séries
         </p>
+        {/* Nom du serveur */}
+        <div className="mb-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Server className="w-3 h-3 text-zinc-500" />
+            <span className="text-xs text-zinc-400">Nom du serveur (affiché dans les apps)</span>
+          </div>
+          <input
+            type="text"
+            value={config.jellyfinServerName || ''}
+            onChange={(e) => {
+              setServerNameManuallyEdited(true);
+              onConfigChange({ jellyfinServerName: e.target.value });
+            }}
+            className={`input-field text-sm py-2.5 ${errors.jellyfinServerName ? 'input-field-error' : ''}`}
+            placeholder="Nom du serveur Jellyfin"
+          />
+        </div>
+        {/* Compte admin */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-zinc-400">Compte administrateur</span>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <input
             type="text"
@@ -154,6 +212,25 @@ export default function QuickConnect({ config, onConfigChange, onNext, onBack }:
         </div>
       </div>
 
+      {/* Jellyseerr */}
+      <div className="card !p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Mail className="w-4 h-4 text-blue-400" />
+          <span className="font-medium text-white text-sm">Jellyseerr</span>
+        </div>
+        <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
+          <Info className="w-3 h-3" />
+          Interface pour demander des films et séries à télécharger
+        </p>
+        <input
+          type="email"
+          value={config.adminEmail || ''}
+          onChange={(e) => onConfigChange({ adminEmail: e.target.value })}
+          className={`input-field text-sm py-2.5 ${errors.adminEmail ? 'input-field-error' : ''}`}
+          placeholder="Email administrateur"
+        />
+      </div>
+
       {/* Navigation */}
       <div className="flex justify-between pt-4">
         <button onClick={onBack} className="btn-ghost">
@@ -162,16 +239,7 @@ export default function QuickConnect({ config, onConfigChange, onNext, onBack }:
         </button>
         <button
           type="button"
-          onClick={() => {
-            try {
-              console.log('[QuickConnect] Button clicked, calling onNext');
-              onNext();
-              console.log('[QuickConnect] onNext completed');
-            } catch (error) {
-              console.error('[QuickConnect] Error in onNext:', error);
-              alert('Erreur: ' + String(error));
-            }
-          }}
+          onClick={handleNext}
           className="btn-primary"
         >
           Rechercher le Pi

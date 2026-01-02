@@ -9,7 +9,7 @@ interface CompleteProps {
 }
 
 const services = [
-  { name: 'Jellyfin', port: 8096, icon: '📺', desc: 'Media Server' },
+  { name: 'Jellyfin', port: 8096, icon: '📺', desc: 'Media Server', isJellyfin: true },
   { name: 'Jellyseerr', port: 5055, icon: '🎬', desc: 'Requêtes' },
   { name: 'Radarr', port: 7878, icon: '🎥', desc: 'Films' },
   { name: 'Sonarr', port: 8989, icon: '📺', desc: 'Séries' },
@@ -20,7 +20,7 @@ const services = [
 ];
 
 export default function Complete({ piInfo, onRestart }: CompleteProps) {
-  const { config } = useStore();
+  const { config, jellyfinAuth } = useStore();
   const [copied, setCopied] = useState<string | null>(null);
 
   const copy = async (text: string) => {
@@ -30,6 +30,29 @@ export default function Complete({ piInfo, onRestart }: CompleteProps) {
   };
 
   const getUrl = (port: number) => `http://${piInfo.ip}:${port}`;
+
+  // Ouvrir Jellyfin avec le bon ServerId pour éviter "Incompatibilité du serveur"
+  const openJellyfin = () => {
+    const baseUrl = `http://${piInfo.ip}:8096`;
+    if (jellyfinAuth?.server_id) {
+      // Ouvrir avec selectserver pour forcer la reconnexion au bon serveur
+      // Cela évite le message "Incompatibilité du serveur" causé par le cache browser
+      open(`${baseUrl}/web/#/selectserver.html`);
+      console.log('[Complete] Opening Jellyfin with server selection, ServerId:', jellyfinAuth.server_id);
+    } else {
+      // Fallback: ouvrir normalement
+      open(baseUrl);
+    }
+  };
+
+  // Handler pour les services - utilise openJellyfin pour Jellyfin
+  const openService = (service: typeof services[0]) => {
+    if (service.isJellyfin) {
+      openJellyfin();
+    } else {
+      open(getUrl(service.port));
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -47,7 +70,7 @@ export default function Complete({ piInfo, onRestart }: CompleteProps) {
         {services.map((s) => (
           <button
             key={s.name}
-            onClick={() => open(getUrl(s.port))}
+            onClick={() => openService(s)}
             className="card !p-3 hover:bg-zinc-700/50 transition-colors group"
           >
             <div className="text-center">
@@ -60,24 +83,26 @@ export default function Complete({ piInfo, onRestart }: CompleteProps) {
         ))}
       </div>
 
-      {/* Credentials */}
-      <div className="card !p-4 space-y-3">
-        <span className="text-sm text-zinc-400">Identifiants Jellyfin</span>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-zinc-800/50 rounded-lg p-2 flex items-center justify-between">
-            <code className="text-sm text-white truncate">{config.jellyfinUsername}</code>
-            <button onClick={() => copy(config.jellyfinUsername)} className="p-1 text-zinc-400 hover:text-white">
-              {copied === config.jellyfinUsername ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
-            </button>
-          </div>
-          <div className="bg-zinc-800/50 rounded-lg p-2 flex items-center justify-between">
-            <code className="text-sm text-white">••••••••</code>
-            <button onClick={() => copy(config.jellyfinPassword)} className="p-1 text-zinc-400 hover:text-white">
-              {copied === config.jellyfinPassword ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
-            </button>
+      {/* Credentials - seulement si on a des identifiants */}
+      {config.jellyfinUsername && (
+        <div className="card !p-4 space-y-3">
+          <span className="text-sm text-zinc-400">Identifiants Jellyfin</span>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-zinc-800/50 rounded-lg p-2 flex items-center justify-between">
+              <code className="text-sm text-white truncate">{config.jellyfinUsername}</code>
+              <button onClick={() => copy(config.jellyfinUsername)} className="p-1 text-zinc-400 hover:text-white">
+                {copied === config.jellyfinUsername ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+              </button>
+            </div>
+            <div className="bg-zinc-800/50 rounded-lg p-2 flex items-center justify-between">
+              <code className="text-sm text-white">••••••••</code>
+              <button onClick={() => copy(config.jellyfinPassword)} className="p-1 text-zinc-400 hover:text-white">
+                {copied === config.jellyfinPassword ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Status */}
       <div className="flex items-center gap-2 p-3 bg-green-500/10 rounded-xl">
@@ -88,7 +113,7 @@ export default function Complete({ piInfo, onRestart }: CompleteProps) {
 
       {/* Actions */}
       <div className="flex justify-center gap-3">
-        <button onClick={() => open(getUrl(8096))} className="btn-primary">
+        <button onClick={openJellyfin} className="btn-primary">
           Ouvrir Jellyfin <ExternalLink className="w-4 h-4" />
         </button>
         <button onClick={onRestart} className="btn-secondary">

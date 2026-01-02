@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { ArrowLeft, ArrowRight, Eye, EyeOff, ExternalLink, Wifi, Key, User, Info, Monitor } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { ArrowLeft, ArrowRight, Eye, EyeOff, ExternalLink, Wifi, Key, User, Info, Monitor, Mail, Server } from 'lucide-react';
 import { open } from '@tauri-apps/api/shell';
 import { Config } from '../../lib/store';
 
@@ -36,6 +36,16 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
   const [showWifiPassword, setShowWifiPassword] = useState(false);
   const [showJellyfinPassword, setShowJellyfinPassword] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [serverNameManuallyEdited, setServerNameManuallyEdited] = useState(false);
+  const previousHostname = useRef(config.hostname);
+
+  // Synchroniser le nom du serveur Jellyfin avec le hostname (sauf si édité manuellement)
+  useEffect(() => {
+    if (!serverNameManuallyEdited && config.hostname !== previousHostname.current) {
+      onConfigChange({ jellyfinServerName: config.hostname });
+    }
+    previousHostname.current = config.hostname;
+  }, [config.hostname, serverNameManuallyEdited, onConfigChange]);
 
   const validate = (): boolean => {
     const newErrors: Record<string, string> = {};
@@ -52,6 +62,10 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
     if (!config.jellyfinUsername.trim()) newErrors.jellyfinUsername = 'Requis';
     if (!config.jellyfinPassword.trim()) newErrors.jellyfinPassword = 'Requis';
     else if (config.jellyfinPassword.length < 4) newErrors.jellyfinPassword = 'Min 4 caractères';
+    if (!config.jellyfinServerName?.trim()) newErrors.jellyfinServerName = 'Requis';
+    // Jellyseerr
+    if (!config.adminEmail?.trim()) newErrors.adminEmail = 'Requis';
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.adminEmail)) newErrors.adminEmail = 'Email invalide';
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -70,7 +84,7 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
         </div>
         <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
           <Info className="w-3 h-3" />
-          Créez vos identifiants pour accéder au Pi en SSH
+          Identifiants SSH pour se connecter au Raspberry Pi
         </p>
         <div className="grid grid-cols-3 gap-3">
           <div>
@@ -187,6 +201,10 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
             </button>
           </div>
         </div>
+        <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
+          <Info className="w-3 h-3" />
+          Service de débridage pour télécharger depuis les hébergeurs premium
+        </p>
         <input
           type="text"
           value={config.alldebridKey}
@@ -221,7 +239,7 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
         </div>
         <p className="text-xs text-zinc-500 mb-2 flex items-center gap-1">
           <Info className="w-3 h-3" />
-          Connectez-vous sur YGG API et copiez votre passkey depuis votre compte
+          Accès aux torrents YGGtorrent pour plus de contenus français
         </p>
         <input
           type="text"
@@ -237,13 +255,34 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
         <div className="flex items-center justify-between mb-2">
           <div className="flex items-center gap-2">
             <User className="w-4 h-4 text-purple-400" />
-            <span className="font-medium text-white text-sm">Compte Jellyfin</span>
+            <span className="font-medium text-white text-sm">Jellyfin</span>
           </div>
         </div>
         <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
           <Info className="w-3 h-3" />
-          Choisissez vos identifiants — le compte sera créé automatiquement
+          Serveur média pour regarder vos films et séries
         </p>
+        {/* Nom du serveur */}
+        <div className="mb-3">
+          <div className="flex items-center gap-2 mb-1">
+            <Server className="w-3 h-3 text-zinc-500" />
+            <span className="text-xs text-zinc-400">Nom du serveur (affiché dans les apps)</span>
+          </div>
+          <input
+            type="text"
+            value={config.jellyfinServerName || ''}
+            onChange={(e) => {
+              setServerNameManuallyEdited(true);
+              onConfigChange({ jellyfinServerName: e.target.value });
+            }}
+            className={`input-field text-sm py-2.5 ${errors.jellyfinServerName ? 'input-field-error' : ''}`}
+            placeholder="Nom du serveur Jellyfin"
+          />
+        </div>
+        {/* Compte admin */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xs text-zinc-400">Compte administrateur</span>
+        </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
             <input
@@ -271,6 +310,25 @@ export default function ConfigForm({ config, onConfigChange, onNext, onBack }: C
             </button>
           </div>
         </div>
+      </div>
+
+      {/* Jellyseerr */}
+      <div className="card !p-4">
+        <div className="flex items-center gap-2 mb-2">
+          <Mail className="w-4 h-4 text-blue-400" />
+          <span className="font-medium text-white text-sm">Jellyseerr</span>
+        </div>
+        <p className="text-xs text-zinc-500 mb-3 flex items-center gap-1">
+          <Info className="w-3 h-3" />
+          Interface pour demander des films et séries à télécharger
+        </p>
+        <input
+          type="email"
+          value={config.adminEmail || ''}
+          onChange={(e) => onConfigChange({ adminEmail: e.target.value })}
+          className={`input-field text-sm py-2.5 ${errors.adminEmail ? 'input-field-error' : ''}`}
+          placeholder="Email administrateur"
+        />
       </div>
 
       {/* Navigation - Always visible */}

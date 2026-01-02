@@ -12,6 +12,7 @@ import FlashProgress from './components/Wizard/FlashProgress';
 import WaitingPi from './components/Wizard/WaitingPi';
 import ConfigProgress from './components/Wizard/ConfigProgress';
 import Complete from './components/Wizard/Complete';
+import ServicesView from './components/Wizard/ServicesView';
 
 import { useStore } from './lib/store';
 
@@ -25,7 +26,8 @@ type WizardStep =
   | 'flash'
   | 'waiting'
   | 'configure'
-  | 'complete';
+  | 'complete'
+  | 'services';
 
 type FlowMode = 'full' | 'connect' | 'reconfigure';
 
@@ -71,9 +73,9 @@ function App() {
   // Sélectionner les étapes en fonction du mode
   const currentSteps = flowMode === 'connect' ? CONNECT_STEPS : FULL_STEPS;
   const visibleStepIndex = currentSteps.findIndex((s) => s.id === step);
-  // Si on est sur permission ou menu, pas d'affichage du stepper
-  const currentStepIndex = ['permission', 'menu', 'welcome'].includes(step) ? -1 : visibleStepIndex;
-  const showStepper = !['permission', 'menu', 'welcome'].includes(step);
+  // Si on est sur permission, menu, welcome ou services, pas d'affichage du stepper
+  const currentStepIndex = ['permission', 'menu', 'welcome', 'services'].includes(step) ? -1 : visibleStepIndex;
+  const showStepper = !['permission', 'menu', 'welcome', 'services'].includes(step);
 
   // Vérifier si on a une config existante (pour le message dans le menu)
   const hasExistingConfig = Boolean(config.hostname && config.hostname !== 'jellypi');
@@ -99,8 +101,12 @@ function App() {
               setFlowMode('connect');
               setStep('quick-connect');
             }}
+            onViewServices={() => setStep('services')}
           />
         );
+
+      case 'services':
+        return <ServicesView onBack={() => setStep('menu')} />;
 
       case 'welcome':
         return <Welcome onNext={() => setStep('sd-selection')} />;
@@ -205,7 +211,7 @@ function App() {
           </div>
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
-              JellySetup
+              EasyJelly
               <Sparkles className="w-4 h-4 text-purple-400" />
             </h1>
             <p className="text-xs text-zinc-500">Configuration automatique</p>
@@ -277,7 +283,7 @@ function App() {
       {/* Footer */}
       <footer className="relative z-10 px-8 py-4 text-center border-t border-zinc-800/50">
         <p className="text-xs text-zinc-600">
-          JellySetup v1.0.0 • Besoin d'aide ?{' '}
+          EasyJelly v1.1.0 • Besoin d'aide ?{' '}
           <a href="#" className="text-purple-400 hover:text-purple-300 transition-colors">
             Contactez l'administrateur
           </a>
