@@ -34,6 +34,17 @@ pub async fn apply_config_password(
 ) -> Result<()> {
     println!("[Sonarr] Applying master configuration...");
 
+    // IMPORTANT: Supprimer la DB Sonarr pour repartir sur une base propre
+    let cleanup_script = r#"
+cd ~/media-stack && docker compose stop sonarr
+rm -f ~/media-stack/sonarr/sonarr.db*
+echo "✅ Sonarr database cleaned"
+cd ~/media-stack && docker compose up -d sonarr
+"#;
+
+    ssh::execute_command_password(host, username, password, cleanup_script).await?;
+    println!("[Sonarr] ✅ Database cleaned and service restarted");
+
     // Sonarr utilise un fichier config.xml
     // On va extraire les indexers et les configurer via l'API Sonarr
 

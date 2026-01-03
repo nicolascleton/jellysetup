@@ -35,6 +35,18 @@ pub async fn apply_config_password(
 ) -> Result<()> {
     println!("[Jellyfin] Applying master configuration...");
 
+    // IMPORTANT: Supprimer TOUTE la config et DB Jellyfin pour repartir sur une instance neuve
+    let cleanup_script = r#"
+cd ~/media-stack && docker compose stop jellyfin
+rm -rf ~/media-stack/jellyfin/config/*
+rm -rf ~/media-stack/jellyfin/data/*
+echo "✅ Jellyfin config and data cleaned (fresh instance)"
+cd ~/media-stack && docker compose up -d jellyfin
+"#;
+
+    ssh::execute_command_password(host, username, password, cleanup_script).await?;
+    println!("[Jellyfin] ✅ Fresh instance created and service restarted");
+
     // Jellyfin a plusieurs fichiers de config
     // - system.xml (configuration système)
     // - network.xml (configuration réseau)

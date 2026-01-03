@@ -34,6 +34,17 @@ pub async fn apply_config_password(
 ) -> Result<()> {
     println!("[Radarr] Applying master configuration...");
 
+    // IMPORTANT: Supprimer la DB Radarr pour repartir sur une base propre
+    let cleanup_script = r#"
+cd ~/media-stack && docker compose stop radarr
+rm -f ~/media-stack/radarr/radarr.db*
+echo "✅ Radarr database cleaned"
+cd ~/media-stack && docker compose up -d radarr
+"#;
+
+    ssh::execute_command_password(host, username, password, cleanup_script).await?;
+    println!("[Radarr] ✅ Database cleaned and service restarted");
+
     // Radarr utilise un fichier config.xml
     // On va extraire les indexers et les configurer via l'API Radarr
 

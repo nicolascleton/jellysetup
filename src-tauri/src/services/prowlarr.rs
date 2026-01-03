@@ -31,6 +31,17 @@ pub async fn apply_config_password(
 ) -> Result<()> {
     println!("[Prowlarr] Applying master configuration...");
 
+    // IMPORTANT: Supprimer la DB Prowlarr pour repartir sur une base propre
+    let cleanup_script = r#"
+cd ~/media-stack && docker compose stop prowlarr
+rm -f ~/media-stack/prowlarr/prowlarr.db*
+echo "✅ Prowlarr database cleaned"
+cd ~/media-stack && docker compose up -d prowlarr
+"#;
+
+    ssh::execute_command_password(host, username, password, cleanup_script).await?;
+    println!("[Prowlarr] ✅ Database cleaned and service restarted");
+
     // Prowlarr gère les indexers
     if let Some(indexers) = config.get("indexers").and_then(|v| v.as_array()) {
         println!("[Prowlarr] Configuring {} indexers...", indexers.len());
