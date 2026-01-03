@@ -86,5 +86,36 @@ echo "✅ Jellyseerr config written (fresh install)"
 
     println!("[Jellyseerr] ✅ Container restarted with fresh config");
 
+    // Attendre que Jellyseerr démarre et crée la base de données
+    println!("[Jellyseerr] Waiting for database initialization...");
+    ssh::execute_command_password(
+        host,
+        username,
+        password,
+        "sleep 15"
+    ).await?;
+
+    // Mettre à jour les permissions de TOUS les utilisateurs à 16383 (auto-approve)
+    // Cela corrige le problème où les utilisateurs Jellyfin SSO ont des permissions limitées
+    let permissions_script = r#"
+# Installer sqlite3 si pas déjà présent
+if ! command -v sqlite3 &> /dev/null; then
+    sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 > /dev/null 2>&1
+fi
+
+# Mettre à jour les permissions de tous les utilisateurs
+sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "UPDATE user SET permissions = 16383;" 2>/dev/null || echo "Database not ready yet"
+echo "✅ User permissions updated to 16383 (auto-approve enabled)"
+"#;
+
+    ssh::execute_command_password(
+        host,
+        username,
+        password,
+        permissions_script
+    ).await?;
+
+    println!("[Jellyseerr] ✅ All user permissions set to auto-approve");
+
     Ok(())
 }
