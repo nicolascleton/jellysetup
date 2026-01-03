@@ -79,28 +79,37 @@ echo "✅ Jellyseerr database cleaned and service started"
 
     println!("[Jellyseerr] ✅ Configuration applied successfully (fresh config)");
 
-    // Attendre que Jellyseerr démarre et crée la base de données
-    println!("[Jellyseerr] Waiting for database initialization...");
+    // Attendre que Jellyseerr démarre (vérifier l'API au lieu de la DB car elle est créée au premier accès)
+    println!("[Jellyseerr] Waiting for API to be ready...");
     let mut jellyseerr_ready = false;
     for i in 0..24 {  // Max 2 minutes (24 * 5s)
-        // Vérifier si la table user existe dans la DB
+        // Vérifier si Jellyseerr répond sur son API
         let check = ssh::execute_command_password(host, username, password,
-            "cd ~/media-stack && docker run --rm -v \"$(pwd)/jellyseerr/config:/config\" alpine sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /config/db.sqlite3 \"SELECT name FROM sqlite_master WHERE type=\\\"table\\\" AND name=\\\"user\\\";\"' 2>/dev/null || echo 'TABLE_NOT_FOUND'"
+            "curl -s 'http://localhost:5055/api/v1/status' 2>/dev/null || echo 'API_ERROR'"
         ).await.unwrap_or_default();
 
-        println!("[Jellyseerr] Check {}/24: {}", i + 1, if check.contains("user") { "user table found" } else { "waiting..." });
+        println!("[Jellyseerr] Check {}/24: {}", i + 1, if check.contains("version") || check.contains("initialized") { "API ready" } else { "waiting..." });
 
-        if check.trim() == "user" {
+        if check.contains("version") || check.contains("initialized") || check.len() > 10 {
             jellyseerr_ready = true;
-            println!("[Jellyseerr] ✅ Database ready after {} seconds", (i + 1) * 5);
+            println!("[Jellyseerr] ✅ API ready after {} seconds", (i + 1) * 5);
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 
     if !jellyseerr_ready {
-        return Err(anyhow::anyhow!("Jellyseerr database not initialized after 120 seconds"));
+        return Err(anyhow::anyhow!("Jellyseerr API not ready after 120 seconds"));
     }
+
+    // Forcer la création de la DB en accédant au wizard (sinon la DB reste vide)
+    println!("[Jellyseerr] Triggering database creation via wizard access...");
+    ssh::execute_command_password(host, username, password,
+        "curl -s 'http://localhost:5055/initialize' >/dev/null 2>&1 || true"
+    ).await.ok();
+
+    // Attendre que la DB soit créée
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
     // Créer l'utilisateur admin directement dans la DB via docker exec
     // IMPORTANT: On utilise docker exec avec un container Alpine qui a sqlite3
