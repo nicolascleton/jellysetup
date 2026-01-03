@@ -54,36 +54,37 @@ pub async fn apply_config_password(
 ) -> Result<()> {
     println!("[Jellyseerr] Applying master configuration...");
 
-    // Convertir la config en JSON string
-    let config_str = serde_json::to_string_pretty(config)?;
+    // NOUVELLE STRATÉGIE 100% AUTONOME via API officielle:
+    // 1. Clean la DB et redémarrer Jellyseerr
+    // 2. Attendre que l'API soit prête
+    // 3. Utiliser POST /api/v1/auth/jellyfin pour créer le premier admin automatiquement
+    // 4. Configurer Radarr/Sonarr via l'API
 
-    // STRATÉGIE JELLYSEERR pour installation autonome SANS sudo:
-    // 1. Utiliser docker exec pour supprimer les fichiers (pas besoin de sudo sur l'hôte)
-    // 2. Laisser Jellyseerr créer sa DB fraîche
-    // 3. Utiliser docker exec + sqlite3 pour créer l'admin automatiquement
-    // 4. Utiliser l'API pour configurer Radarr/Sonarr
     let script = r#"
 # Arrêter Jellyseerr
 cd ~/media-stack && docker compose stop jellyseerr
 
-# Supprimer config et DB via docker exec (évite sudo sur l'hôte)
-docker run --rm -v "$(pwd)/jellyseerr:/app" alpine sh -c "rm -rf /app/config/* /app/db/*"
+# Supprimer TOUT le contenu Jellyseerr (config, db, cache, settings.json)
+# pour repartir complètement à zéro
+docker run --rm -v "$(pwd)/jellyseerr:/app" alpine sh -c "rm -rf /app/*"
 
-# Redémarrer Jellyseerr pour créer une DB fraîche
+# Recréer les dossiers nécessaires
+mkdir -p jellyseerr/config jellyseerr/db
+
+# Redémarrer Jellyseerr pour créer une installation fraîche
 docker compose up -d jellyseerr
 
-echo "✅ Jellyseerr database cleaned and service started"
+echo "✅ Jellyseerr completely cleaned and service started"
 "#;
 
     ssh::execute_command_password(host, username, password, &script).await?;
 
     println!("[Jellyseerr] ✅ Configuration applied successfully (fresh config)");
 
-    // Attendre que Jellyseerr démarre (vérifier l'API au lieu de la DB car elle est créée au premier accès)
+    // Attendre que Jellyseerr démarre et que l'API soit prête
     println!("[Jellyseerr] Waiting for API to be ready...");
     let mut jellyseerr_ready = false;
     for i in 0..24 {  // Max 2 minutes (24 * 5s)
-        // Vérifier si Jellyseerr répond sur son API
         let check = ssh::execute_command_password(host, username, password,
             "curl -s 'http://localhost:5055/api/v1/status' 2>/dev/null || echo 'API_ERROR'"
         ).await.unwrap_or_default();
@@ -102,71 +103,78 @@ echo "✅ Jellyseerr database cleaned and service started"
         return Err(anyhow::anyhow!("Jellyseerr API not ready after 120 seconds"));
     }
 
-    // Forcer la création de la DB en accédant au wizard (sinon la DB reste vide)
-    println!("[Jellyseerr] Triggering database creation via wizard access...");
-    ssh::execute_command_password(host, username, password,
-        "curl -s 'http://localhost:5055/initialize' >/dev/null 2>&1 || true"
-    ).await.ok();
+    // WORKFLOW COMPLET comme Buildarr:
+    // 1. POST /auth/jellyfin (sauvegarde cookies)
+    // 2. GET /settings/jellyfin/library?sync=true (avec cookies)
+    // 3. GET /settings/jellyfin/library?enable=... (avec cookies)
+    // 4. POST /settings/initialize (avec cookies)
 
-    // Attendre que la DB soit créée
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    println!("[Jellyseerr] Initializing via Buildarr-style workflow...");
 
-    // Créer l'utilisateur admin directement dans la DB via docker exec
-    // IMPORTANT: On utilise docker exec avec un container Alpine qui a sqlite3
-    // On génère le hash bcrypt du password Jellyfin
-    // Créer un script Python qui sera écrit dans le container
-    let python_script = format!(r#"import bcrypt
-import sqlite3
+    let initialization_script = format!(r#"
+# Fichier cookie temporaire
+COOKIE_FILE="/tmp/jellyseerr_cookies.txt"
+rm -f "$COOKIE_FILE"
 
-print('🔐 Generating bcrypt hash for admin password...', flush=True)
-# Hash du password
-password_hash = bcrypt.hashpw(b'{}', bcrypt.gensalt(rounds=10)).decode()
+echo "📡 Step 1: Authenticating with Jellyfin..."
+AUTH_RESULT=$(curl -s -c "$COOKIE_FILE" -X POST 'http://localhost:5055/api/v1/auth/jellyfin' \
+  -H 'Content-Type: application/json' \
+  -d '{{
+    "hostname": "http://localhost:8096",
+    "username": "{}",
+    "password": "{}",
+    "email": "{}"
+  }}')
 
-print('📝 Inserting admin user into database...', flush=True)
-# Connexion à la DB (on sait qu'elle existe grâce au wait loop Rust)
-conn = sqlite3.connect('/config/db.sqlite3')
-cursor = conn.cursor()
+echo "Auth response: $AUTH_RESULT"
 
-# Créer l'utilisateur admin
-cursor.execute('''
-INSERT OR REPLACE INTO user (id, email, username, password, userType, permissions, avatar, createdAt, updatedAt)
-VALUES (1, ?, ?, ?, 1, 16383, '', datetime('now'), datetime('now'))
-''', ('{}', '{}', password_hash))
+# Vérifier si auth a réussi (pas d'erreur critique)
+if echo "$AUTH_RESULT" | grep -q '"error"'; then
+  echo "❌ Authentication failed: $AUTH_RESULT"
+  rm -f "$COOKIE_FILE"
+  exit 1
+fi
 
-conn.commit()
-conn.close()
+echo "✅ Authenticated successfully"
 
-print('✅ Admin user created: {} / {}', flush=True)
-"#, jellyfin_password, admin_email, jellyfin_username, admin_email, jellyfin_username);
+echo "📚 Step 2: Syncing Jellyfin libraries..."
+LIBRARIES=$(curl -s -b "$COOKIE_FILE" 'http://localhost:5055/api/v1/settings/jellyfin/library?sync=true')
+echo "Libraries: $LIBRARIES"
 
-    let create_admin_script = format!(r#"
-# Créer l'utilisateur admin via docker exec avec sqlite3 + bcrypt
-cd ~/media-stack
+# Extraire les IDs des bibliothèques (Movies + TV)
+LIBRARY_IDS=$(echo "$LIBRARIES" | grep -o '"id":"[^"]*"' | cut -d'"' -f4 | tr '\n' ',' | sed 's/,$//')
+echo "Library IDs: $LIBRARY_IDS"
 
-# Écrire le script Python dans un fichier temporaire
-cat > /tmp/create_jellyseerr_admin.py <<'PYTHON_EOF'
-{}
-PYTHON_EOF
+if [ -n "$LIBRARY_IDS" ]; then
+  echo "📝 Step 3: Enabling libraries: $LIBRARY_IDS"
+  curl -s -b "$COOKIE_FILE" "http://localhost:5055/api/v1/settings/jellyfin/library?enable=$LIBRARY_IDS" > /dev/null
+  echo "✅ Libraries enabled"
+fi
 
-# Exécuter le script dans le container Alpine
-docker run --rm -v "$(pwd)/jellyseerr/config:/config" -v /tmp/create_jellyseerr_admin.py:/script.py alpine sh -c "
-  apk add --no-cache sqlite python3 py3-pip >/dev/null 2>&1
-  pip3 install --break-system-packages bcrypt >/dev/null 2>&1
-  python3 /script.py
-"
+echo "🏁 Step 4: Finalizing initialization..."
+INIT_RESULT=$(curl -s -b "$COOKIE_FILE" -X POST 'http://localhost:5055/api/v1/settings/initialize')
+echo "Initialize response: $INIT_RESULT"
 
 # Nettoyer
-rm /tmp/create_jellyseerr_admin.py
-"#, python_script);
+rm -f "$COOKIE_FILE"
 
-    ssh::execute_command_password(
+echo "✅ Jellyseerr fully initialized!"
+"#, jellyfin_username, jellyfin_password, admin_email);
+
+    let init_result = ssh::execute_command_password(
         host,
         username,
         password,
-        &create_admin_script
+        &initialization_script
     ).await?;
 
-    println!("[Jellyseerr] ✅ Admin user created automatically");
+    println!("[Jellyseerr] Initialization output:\n{}", init_result);
+
+    if init_result.contains("Authentication failed") {
+        return Err(anyhow::anyhow!("Failed to authenticate with Jellyfin"));
+    }
+
+    println!("[Jellyseerr] ✅ Admin created and initialized via Buildarr workflow");
 
     // Configurer Radarr et Sonarr via l'API Jellyseerr
     // Cela garantit que les serveurs sont bien enregistrés dans la base de données
