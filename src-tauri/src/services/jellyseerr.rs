@@ -62,11 +62,13 @@ pub async fn apply_config_password(
 cd ~/media-stack && docker compose stop jellyseerr
 
 # Supprimer toute la config existante (settings.json dans /config)
-rm -rf ~/media-stack/jellyseerr/config/*
+# Utiliser sudo car les fichiers appartiennent à root
+sudo rm -rf ~/media-stack/jellyseerr/config/*
 mkdir -p ~/media-stack/jellyseerr/config
 
 # Supprimer la base de données existante (db.sqlite3 dans /db)
-rm -rf ~/media-stack/jellyseerr/db/*
+# IMPORTANT: sudo requis car les fichiers DB appartiennent à root
+sudo rm -rf ~/media-stack/jellyseerr/db/*
 mkdir -p ~/media-stack/jellyseerr/db
 
 # Écrire la nouvelle config
