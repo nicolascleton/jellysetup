@@ -1373,66 +1373,56 @@ pub async fn run_full_installation(
         if let Some(jellyseerr_config) = &master_cfg.jellyseerr_config {
             emit_progress(&window, "config", 90, "Configuration Jellyseerr...", None);
             println!("[MasterConfig] Applying Jellyseerr config...");
-            if let Err(e) = crate::services::apply_service_config(
+            crate::services::apply_service_config(
                 host, username, private_key,
                 "jellyseerr",
                 jellyseerr_config,
                 &template_vars
-            ).await {
-                println!("[MasterConfig] ⚠️  Jellyseerr config error: {}", e);
-            }
+            ).await?;
         }
 
         if let Some(radarr_config) = &master_cfg.radarr_config {
             emit_progress(&window, "config", 91, "Configuration Radarr...", None);
             println!("[MasterConfig] Applying Radarr config...");
-            if let Err(e) = crate::services::apply_service_config(
+            crate::services::apply_service_config(
                 host, username, private_key,
                 "radarr",
                 radarr_config,
                 &template_vars
-            ).await {
-                println!("[MasterConfig] ⚠️  Radarr config error: {}", e);
-            }
+            ).await?;
         }
 
         if let Some(sonarr_config) = &master_cfg.sonarr_config {
             emit_progress(&window, "config", 92, "Configuration Sonarr...", None);
             println!("[MasterConfig] Applying Sonarr config...");
-            if let Err(e) = crate::services::apply_service_config(
+            crate::services::apply_service_config(
                 host, username, private_key,
                 "sonarr",
                 sonarr_config,
                 &template_vars
-            ).await {
-                println!("[MasterConfig] ⚠️  Sonarr config error: {}", e);
-            }
+            ).await?;
         }
 
         if let Some(prowlarr_config) = &master_cfg.prowlarr_config {
             emit_progress(&window, "config", 93, "Configuration Prowlarr...", None);
             println!("[MasterConfig] Applying Prowlarr config...");
-            if let Err(e) = crate::services::apply_service_config(
+            crate::services::apply_service_config(
                 host, username, private_key,
                 "prowlarr",
                 prowlarr_config,
                 &template_vars
-            ).await {
-                println!("[MasterConfig] ⚠️  Prowlarr config error: {}", e);
-            }
+            ).await?;
         }
 
         if let Some(jellyfin_config) = &master_cfg.jellyfin_config {
             emit_progress(&window, "config", 94, "Configuration Jellyfin...", None);
             println!("[MasterConfig] Applying Jellyfin config...");
-            if let Err(e) = crate::services::apply_service_config(
+            crate::services::apply_service_config(
                 host, username, private_key,
                 "jellyfin",
                 jellyfin_config,
                 &template_vars
-            ).await {
-                println!("[MasterConfig] ⚠️  Jellyfin config error: {}", e);
-            }
+            ).await?;
         }
 
         println!("[MasterConfig] ✅ All service configurations applied from master_config");
