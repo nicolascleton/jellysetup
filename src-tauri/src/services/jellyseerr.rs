@@ -115,13 +115,14 @@ fi
 # Attendre que la DB soit créée
 sleep 5
 
+# IMPORTANT: Utiliser sudo pour sqlite3 car la DB appartient à root
 # Vérifier si des utilisateurs existent déjà
-USER_COUNT=$(sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "SELECT COUNT(*) FROM user;" 2>/dev/null || echo "0")
+USER_COUNT=$(sudo sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "SELECT COUNT(*) FROM user;" 2>/dev/null || echo "0")
 
 if [ "$USER_COUNT" = "0" ]; then
     # Créer un utilisateur admin local directement dans la DB
     # Cela évite de devoir passer par le wizard de setup
-    sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 <<'SQL'
+    sudo sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 <<'SQL'
 INSERT INTO user (email, username, plexUsername, jellyfinUsername, plexId, jellyfinUserId, permissions, avatar, createdAt, updatedAt, userType, plexToken, jellyfinAuthToken, jellyfinDeviceId, jellyfinEmailAddress)
 VALUES (
     'admin@jellyseerr.local',
@@ -144,7 +145,7 @@ SQL
     echo "✅ Admin user created with auto-approve permissions"
 else
     # Des utilisateurs existent déjà, mettre à jour leurs permissions
-    sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "UPDATE user SET permissions = 16383;" 2>/dev/null
+    sudo sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "UPDATE user SET permissions = 16383;" 2>/dev/null
     echo "✅ User permissions updated to 16383 (auto-approve enabled)"
 fi
 "#;
