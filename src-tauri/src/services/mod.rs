@@ -44,6 +44,9 @@ pub async fn apply_service_config_password(
     service_name: &str,
     config_json: &serde_json::Value,
     vars: &TemplateVars,
+    jellyfin_username: &str,
+    jellyfin_password: &str,
+    admin_email: &str,
 ) -> Result<()> {
     println!("[Services] Applying {} configuration...", service_name);
 
@@ -69,7 +72,11 @@ pub async fn apply_service_config_password(
                 .and_then(|key| key.as_str())
                 .unwrap_or("");
 
-            jellyseerr::apply_config_password(host, username, password, &resolved_config, radarr_api, sonarr_api).await
+            jellyseerr::apply_config_password(
+                host, username, password, &resolved_config,
+                radarr_api, sonarr_api,
+                jellyfin_username, jellyfin_password, admin_email
+            ).await
         },
         "radarr" => radarr::apply_config_password(host, username, password, &resolved_config).await,
         "sonarr" => sonarr::apply_config_password(host, username, password, &resolved_config).await,

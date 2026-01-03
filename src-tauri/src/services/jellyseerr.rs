@@ -48,6 +48,9 @@ pub async fn apply_config_password(
     config: &serde_json::Value,
     radarr_api_key: &str,
     sonarr_api_key: &str,
+    jellyfin_username: &str,
+    jellyfin_password: &str,
+    admin_email: &str,
 ) -> Result<()> {
     println!("[Jellyseerr] Applying master configuration...");
 
@@ -87,26 +90,30 @@ echo "✅ Jellyseerr database cleaned and service started"
 
     // Créer l'utilisateur admin directement dans la DB via docker exec
     // IMPORTANT: On utilise docker exec avec un container Alpine qui a sqlite3
-    let create_admin_script = r#"
+    // On génère le hash bcrypt du password Jellyfin
+    let create_admin_script = format!(r#"
 # Attendre que Jellyseerr crée la DB
 sleep 5
 
-# Créer l'utilisateur admin via docker exec avec sqlite3
+# Créer l'utilisateur admin via docker exec avec sqlite3 + bcrypt
 # On monte le répertoire jellyseerr directement depuis media-stack
 cd ~/media-stack
 
 docker run --rm -v "$(pwd)/jellyseerr/config:/config" alpine sh -c "
-  apk add --no-cache sqlite >/dev/null 2>&1
+  apk add --no-cache sqlite python3 py3-pip >/dev/null 2>&1
+  pip3 install --break-system-packages bcrypt >/dev/null 2>&1
 
-  # Créer l'utilisateur admin (email: admin@local.host, password: admin)
-  # Password hash bcrypt pour 'admin': \$2a\$10\$QDN8z8VJcKNQjH8L8Z8Z8eZ8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8O
-  sqlite3 /config/db.sqlite3 <<'SQL'
+  # Générer le hash bcrypt du password Jellyfin
+  PASSWORD_HASH=\$(python3 -c 'import bcrypt; print(bcrypt.hashpw(b\"{}\", bcrypt.gensalt(rounds=10)).decode())')
+
+  # Créer l'utilisateur admin avec les credentials Jellyfin
+  sqlite3 /config/db.sqlite3 <<SQL
 INSERT OR REPLACE INTO user (id, email, username, password, userType, permissions, avatar, createdAt, updatedAt)
 VALUES (
   1,
-  'admin@local.host',
-  'Admin',
-  '\$2a\$10\$QDN8z8VJcKNQjH8L8Z8Z8eZ8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8O',
+  '{}',
+  '{}',
+  '\$PASSWORD_HASH',
   1,
   16383,
   '',
@@ -115,15 +122,15 @@ VALUES (
 );
 SQL
 
-  echo '✅ Admin user created in database'
+  echo '✅ Admin user created: {} / {}'
 "
-"#;
+"#, jellyfin_password, admin_email, jellyfin_username, admin_email, jellyfin_username);
 
     ssh::execute_command_password(
         host,
         username,
         password,
-        create_admin_script
+        &create_admin_script
     ).await?;
 
     println!("[Jellyseerr] ✅ Admin user created automatically");

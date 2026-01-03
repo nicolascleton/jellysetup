@@ -2781,7 +2781,10 @@ pub async fn run_full_installation_password(
         if let Some(jellyseerr_config) = &master_cfg.jellyseerr_config {
             println!("[MasterConfig] Applying Jellyseerr config...");
             if let Err(e) = crate::services::apply_service_config_password(
-                host, username, password, "jellyseerr", jellyseerr_config, &template_vars
+                host, username, password, "jellyseerr", jellyseerr_config, &template_vars,
+                &config.jellyfin_username,
+                &config.jellyfin_password,
+                config.admin_email.as_deref().unwrap_or("admin@jellyseerr.local")
             ).await {
                 println!("[MasterConfig] ⚠️  Jellyseerr config error: {}", e);
             }
@@ -2790,7 +2793,10 @@ pub async fn run_full_installation_password(
         if let Some(radarr_config) = &master_cfg.radarr_config {
             println!("[MasterConfig] Applying Radarr config...");
             if let Err(e) = crate::services::apply_service_config_password(
-                host, username, password, "radarr", radarr_config, &template_vars
+                host, username, password, "radarr", radarr_config, &template_vars,
+                &config.jellyfin_username,
+                &config.jellyfin_password,
+                config.admin_email.as_deref().unwrap_or("admin@jellyseerr.local")
             ).await {
                 println!("[MasterConfig] ⚠️  Radarr config error: {}", e);
             }
@@ -2799,7 +2805,10 @@ pub async fn run_full_installation_password(
         if let Some(sonarr_config) = &master_cfg.sonarr_config {
             println!("[MasterConfig] Applying Sonarr config...");
             if let Err(e) = crate::services::apply_service_config_password(
-                host, username, password, "sonarr", sonarr_config, &template_vars
+                host, username, password, "sonarr", sonarr_config, &template_vars,
+                &config.jellyfin_username,
+                &config.jellyfin_password,
+                config.admin_email.as_deref().unwrap_or("admin@jellyseerr.local")
             ).await {
                 println!("[MasterConfig] ⚠️  Sonarr config error: {}", e);
             }
@@ -2808,7 +2817,10 @@ pub async fn run_full_installation_password(
         if let Some(prowlarr_config) = &master_cfg.prowlarr_config {
             println!("[MasterConfig] Applying Prowlarr config...");
             if let Err(e) = crate::services::apply_service_config_password(
-                host, username, password, "prowlarr", prowlarr_config, &template_vars
+                host, username, password, "prowlarr", prowlarr_config, &template_vars,
+                &config.jellyfin_username,
+                &config.jellyfin_password,
+                config.admin_email.as_deref().unwrap_or("admin@jellyseerr.local")
             ).await {
                 println!("[MasterConfig] ⚠️  Prowlarr config error: {}", e);
             }
@@ -2817,7 +2829,10 @@ pub async fn run_full_installation_password(
         if let Some(jellyfin_config) = &master_cfg.jellyfin_config {
             println!("[MasterConfig] Applying Jellyfin config...");
             if let Err(e) = crate::services::apply_service_config_password(
-                host, username, password, "jellyfin", jellyfin_config, &template_vars
+                host, username, password, "jellyfin", jellyfin_config, &template_vars,
+                &config.jellyfin_username,
+                &config.jellyfin_password,
+                config.admin_email.as_deref().unwrap_or("admin@jellyseerr.local")
             ).await {
                 println!("[MasterConfig] ⚠️  Jellyfin config error: {}", e);
             }
