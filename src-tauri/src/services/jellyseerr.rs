@@ -61,18 +61,20 @@ pub async fn apply_config_password(
     // 4. Configurer Radarr/Sonarr via l'API
 
     let script = r#"
-# Arrêter Jellyseerr
-cd ~/media-stack && docker compose stop jellyseerr
+set -e  # Arrêter si une commande échoue
 
-# Supprimer TOUT le contenu Jellyseerr (config, db, cache, settings.json)
-# pour repartir complètement à zéro
+echo "🛑 Stopping Jellyseerr..."
+cd ~/media-stack
+docker compose stop jellyseerr
+
+echo "🗑️  Deleting Jellyseerr data..."
 docker run --rm -v "$(pwd)/jellyseerr:/app" alpine sh -c "rm -rf /app/*"
 
-# Recréer les dossiers nécessaires
+echo "📁 Recreating directories..."
 mkdir -p jellyseerr/config jellyseerr/db
 
-# Redémarrer Jellyseerr pour créer une installation fraîche
-docker compose up -d jellyseerr
+echo "🚀 Starting Jellyseerr..."
+docker compose up -d jellyseerr 2>&1
 
 echo "✅ Jellyseerr completely cleaned and service started"
 "#;
