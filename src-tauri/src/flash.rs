@@ -870,6 +870,9 @@ services:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - 8282:8282
     volumes:
@@ -907,6 +910,12 @@ services:
           memory: 4G
         reservations:
           memory: 1G
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # Radarr - Gestionnaire de films
   radarr:
@@ -922,6 +931,10 @@ services:
       - TZ=Europe/Paris
       - PUID=1000
       - PGID=1000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   # Sonarr - Gestionnaire de séries
   sonarr:
@@ -937,6 +950,10 @@ services:
       - TZ=Europe/Paris
       - PUID=1000
       - PGID=1000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   # Prowlarr - Gestionnaire d'indexeurs
   prowlarr:
@@ -951,6 +968,10 @@ services:
       - TZ=Europe/Paris
       - PUID=1000
       - PGID=1000
+    deploy:
+      resources:
+        limits:
+          memory: 384M
 
   # Jellyseerr - Interface de requêtes
   jellyseerr:
@@ -958,7 +979,7 @@ services:
     container_name: jellyseerr
     restart: unless-stopped
     ports:
-      - 5055:5055
+      - 5056:5055
     volumes:
       - ./jellyseerr:/app/config
     environment:
