@@ -54,23 +54,27 @@ pub async fn apply_config_password(
     // Convertir la config en JSON string
     let config_str = serde_json::to_string_pretty(config)?;
 
-    // IMPORTANT: Supprimer complètement la config existante pour forcer une réinitialisation
+    // IMPORTANT: Supprimer complètement la config et DB existantes pour forcer une réinitialisation
     // Jellyseerr stocke sa config dans settings.json ET dans db.sqlite3
-    // Il faut tout supprimer pour que la nouvelle config soit chargée
+    // Il faut TOUT supprimer (config + db) pour repartir sur une base propre
     let script = format!(r#"
 # Arrêter Jellyseerr d'abord
 cd ~/media-stack && docker compose stop jellyseerr
 
-# Supprimer toute la config existante (settings.json + db.sqlite3)
+# Supprimer toute la config existante (settings.json dans /config)
 rm -rf ~/media-stack/jellyseerr/config/*
 mkdir -p ~/media-stack/jellyseerr/config
+
+# Supprimer la base de données existante (db.sqlite3 dans /db)
+rm -rf ~/media-stack/jellyseerr/db/*
+mkdir -p ~/media-stack/jellyseerr/db
 
 # Écrire la nouvelle config
 cat > ~/media-stack/jellyseerr/config/settings.json <<'JELLYSEERR_CONFIG_EOF'
 {}
 JELLYSEERR_CONFIG_EOF
 chmod 644 ~/media-stack/jellyseerr/config/settings.json
-echo "✅ Jellyseerr config written (fresh install)"
+echo "✅ Jellyseerr config written and DB cleaned (fresh install)"
 "#, config_str);
 
     // Écrire la config via SSH
