@@ -52,7 +52,25 @@ pub async fn apply_service_config_password(
 
     // Appliquer la config selon le service
     match service_name {
-        "jellyseerr" => jellyseerr::apply_config_password(host, username, password, &resolved_config).await,
+        "jellyseerr" => {
+            // Pour Jellyseerr, on a besoin des clés API Radarr/Sonarr pour la config API
+            // Extraire les valeurs depuis le JSON résolu (qui contient déjà les vraies API keys)
+            let radarr_api = resolved_config.get("radarr")
+                .and_then(|arr| arr.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|obj| obj.get("apiKey"))
+                .and_then(|key| key.as_str())
+                .unwrap_or("");
+
+            let sonarr_api = resolved_config.get("sonarr")
+                .and_then(|arr| arr.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|obj| obj.get("apiKey"))
+                .and_then(|key| key.as_str())
+                .unwrap_or("");
+
+            jellyseerr::apply_config_password(host, username, password, &resolved_config, radarr_api, sonarr_api).await
+        },
         "radarr" => radarr::apply_config_password(host, username, password, &resolved_config).await,
         "sonarr" => sonarr::apply_config_password(host, username, password, &resolved_config).await,
         "prowlarr" => prowlarr::apply_config_password(host, username, password, &resolved_config).await,

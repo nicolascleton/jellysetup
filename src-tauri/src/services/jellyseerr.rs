@@ -46,6 +46,8 @@ pub async fn apply_config_password(
     username: &str,
     password: &str,
     config: &serde_json::Value,
+    radarr_api_key: &str,
+    sonarr_api_key: &str,
 ) -> Result<()> {
     println!("[Jellyseerr] Applying master configuration...");
 
@@ -116,6 +118,65 @@ echo "✅ User permissions updated to 16383 (auto-approve enabled)"
     ).await?;
 
     println!("[Jellyseerr] ✅ All user permissions set to auto-approve");
+
+    // Configurer Radarr et Sonarr via l'API Jellyseerr
+    // Cela garantit que les serveurs sont bien enregistrés dans la base de données
+    let api_config_script = format!(r#"
+# Récupérer l'API key de Jellyseerr depuis settings.json
+API_KEY=$(cat ~/media-stack/jellyseerr/config/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Attendre que Jellyseerr soit prêt
+sleep 5
+
+# Configurer Radarr via l'API
+curl -s -X POST "http://localhost:5055/api/v1/settings/radarr" \
+  -H "X-Api-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "name": "Radarr",
+    "hostname": "radarr",
+    "port": 7878,
+    "apiKey": "{}",
+    "useSsl": false,
+    "activeProfileId": 4,
+    "activeProfileName": "HD-1080p",
+    "activeDirectory": "/mnt/decypharr/movies",
+    "is4k": false,
+    "minimumAvailability": "released",
+    "isDefault": true,
+    "syncEnabled": true
+  }}' > /dev/null 2>&1
+
+# Configurer Sonarr via l'API
+curl -s -X POST "http://localhost:5055/api/v1/settings/sonarr" \
+  -H "X-Api-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "name": "Sonarr",
+    "hostname": "sonarr",
+    "port": 8989,
+    "apiKey": "{}",
+    "useSsl": false,
+    "activeProfileId": 4,
+    "activeProfileName": "HD-1080p",
+    "activeDirectory": "/mnt/decypharr/tv",
+    "is4k": false,
+    "enableSeasonFolders": true,
+    "isDefault": true,
+    "syncEnabled": true
+  }}' > /dev/null 2>&1
+
+echo "✅ Radarr and Sonarr configured via API"
+"#, radarr_api_key, sonarr_api_key);
+
+    ssh::execute_command_password(
+        host,
+        username,
+        password,
+        api_config_script
+    ).await?;
+
+    println!("[Jellyseerr] ✅ Radarr and Sonarr configured via API");
 
     Ok(())
 }
