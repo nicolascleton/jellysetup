@@ -74,9 +74,9 @@ echo "📁 Recreating directories..."
 mkdir -p jellyseerr/config jellyseerr/db
 
 echo "🚀 Starting Jellyseerr..."
-docker compose up -d jellyseerr 2>&1
+nohup docker compose up -d jellyseerr > /tmp/jellyseerr_startup.log 2>&1 &
 
-echo "✅ Jellyseerr completely cleaned and service started"
+echo "✅ Jellyseerr cleanup done, container starting in background"
 "#;
 
     ssh::execute_command_password(host, username, password, &script).await?;
