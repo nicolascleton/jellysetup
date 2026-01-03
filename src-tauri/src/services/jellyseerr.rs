@@ -84,12 +84,12 @@ echo "✅ Jellyseerr completely cleaned and service started"
     // Attendre que Jellyseerr démarre et que l'API soit prête
     println!("[Jellyseerr] Waiting for API to be ready...");
     let mut jellyseerr_ready = false;
-    for i in 0..24 {  // Max 2 minutes (24 * 5s)
+    for i in 0..36 {  // Max 3 minutes (36 * 5s)
         let check = ssh::execute_command_password(host, username, password,
             "curl -s 'http://localhost:5055/api/v1/status' 2>/dev/null || echo 'API_ERROR'"
         ).await.unwrap_or_default();
 
-        println!("[Jellyseerr] Check {}/24: {}", i + 1, if check.contains("version") || check.contains("initialized") { "API ready" } else { "waiting..." });
+        println!("[Jellyseerr] Check {}/36: {}", i + 1, if check.contains("version") || check.contains("initialized") { "API ready" } else { "waiting..." });
 
         if check.contains("version") || check.contains("initialized") || check.len() > 10 {
             jellyseerr_ready = true;
@@ -100,7 +100,7 @@ echo "✅ Jellyseerr completely cleaned and service started"
     }
 
     if !jellyseerr_ready {
-        return Err(anyhow::anyhow!("Jellyseerr API not ready after 120 seconds"));
+        return Err(anyhow::anyhow!("Jellyseerr API not ready after 180 seconds (3 minutes). The container might have crashed or requires more resources."));
     }
 
     // WORKFLOW COMPLET comme Buildarr:
