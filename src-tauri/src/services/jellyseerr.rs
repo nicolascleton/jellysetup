@@ -97,17 +97,50 @@ echo "✅ Jellyseerr config written (fresh install)"
         "sleep 15"
     ).await?;
 
-    // Mettre à jour les permissions de TOUS les utilisateurs à 16383 (auto-approve)
-    // Cela corrige le problème où les utilisateurs Jellyfin SSO ont des permissions limitées
+    // Créer l'utilisateur admin et mettre à jour les permissions
+    // Jellyseerr nécessite qu'un utilisateur se connecte via Jellyfin pour créer le premier compte
+    // On va le faire automatiquement en insérant directement dans la DB
     let permissions_script = r#"
 # Installer sqlite3 si pas déjà présent
 if ! command -v sqlite3 &> /dev/null; then
     sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 > /dev/null 2>&1
 fi
 
-# Mettre à jour les permissions de tous les utilisateurs
-sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "UPDATE user SET permissions = 16383;" 2>/dev/null || echo "Database not ready yet"
-echo "✅ User permissions updated to 16383 (auto-approve enabled)"
+# Attendre que la DB soit créée
+sleep 5
+
+# Vérifier si des utilisateurs existent déjà
+USER_COUNT=$(sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "SELECT COUNT(*) FROM user;" 2>/dev/null || echo "0")
+
+if [ "$USER_COUNT" = "0" ]; then
+    # Créer un utilisateur admin local directement dans la DB
+    # Cela évite de devoir passer par le wizard de setup
+    sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 <<'SQL'
+INSERT INTO user (email, username, plexUsername, jellyfinUsername, plexId, jellyfinUserId, permissions, avatar, createdAt, updatedAt, userType, plexToken, jellyfinAuthToken, jellyfinDeviceId, jellyfinEmailAddress)
+VALUES (
+    'admin@jellyseerr.local',
+    'Admin',
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    16383,
+    '/os_avatar_4.png',
+    datetime('now'),
+    datetime('now'),
+    1,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+);
+SQL
+    echo "✅ Admin user created with auto-approve permissions"
+else
+    # Des utilisateurs existent déjà, mettre à jour leurs permissions
+    sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "UPDATE user SET permissions = 16383;" 2>/dev/null
+    echo "✅ User permissions updated to 16383 (auto-approve enabled)"
+fi
 "#;
 
     ssh::execute_command_password(
