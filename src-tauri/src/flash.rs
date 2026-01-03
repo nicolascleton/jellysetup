@@ -1438,12 +1438,16 @@ pub async fn run_full_installation(
     }
     // =============================================================================
 
+    // Récupérer l'IP locale pour Decypharr
+    let pi_ip = ssh::execute_command(host, username, private_key, "hostname -I | awk '{print $1}'")
+        .await.unwrap_or_else(|_| host.to_string()).trim().to_string();
+
     // Ajouter Decypharr à Radarr
     if !radarr_api.is_empty() {
         let radarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/downloadclient' \
             -H 'X-Api-Key: {}' \
             -H 'Content-Type: application/json' \
-            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "decypharr"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "movieCategory", "value": "radarr"}}]}}'"#, radarr_api);
+            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "{}"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "movieCategory", "value": "radarr"}}]}}'"#, radarr_api, pi_ip);
         ssh::execute_command(host, username, private_key, &radarr_client_cmd).await.ok();
     }
 
@@ -1452,8 +1456,53 @@ pub async fn run_full_installation(
         let sonarr_client_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/downloadclient' \
             -H 'X-Api-Key: {}' \
             -H 'Content-Type: application/json' \
-            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "decypharr"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "tvCategory", "value": "sonarr"}}]}}'"#, sonarr_api);
+            -d '{{"name": "Decypharr", "implementation": "QBittorrent", "configContract": "QBittorrentSettings", "enable": true, "priority": 1, "fields": [{{"name": "host", "value": "{}"}}, {{"name": "port", "value": 8282}}, {{"name": "useSsl", "value": false}}, {{"name": "tvCategory", "value": "sonarr"}}]}}'"#, sonarr_api, pi_ip);
         ssh::execute_command(host, username, private_key, &sonarr_client_cmd).await.ok();
+    }
+
+    // 8.4c: Configurer Decypharr avec les arrs (Radarr/Sonarr)
+    if !radarr_api.is_empty() || !sonarr_api.is_empty() {
+        println!("[Config] Decypharr: Configuring arrs array...");
+
+        let mut arrs_entries = Vec::new();
+
+        if !radarr_api.is_empty() {
+            arrs_entries.push(format!(r#"{{
+      "name": "radarr",
+      "host": "http://{}:7878",
+      "token": "{}",
+      "download_uncached": false,
+      "flatten": true,
+      "cleanup": true
+    }}"#, pi_ip, radarr_api));
+        }
+
+        if !sonarr_api.is_empty() {
+            arrs_entries.push(format!(r#"{{
+      "name": "tv-sonarr",
+      "host": "http://{}:8989",
+      "token": "{}",
+      "download_uncached": false,
+      "flatten": true,
+      "cleanup": true
+    }}"#, pi_ip, sonarr_api));
+        }
+
+        let arrs_json = format!("[{}]", arrs_entries.join(","));
+
+        // Utiliser jq pour mettre à jour le champ arrs dans config.json
+        let update_arrs_cmd = format!(
+            r#"jq '.arrs = {}' ~/media-stack/decypharr/config.json > /tmp/decypharr_config_tmp.json && mv /tmp/decypharr_config_tmp.json ~/media-stack/decypharr/config.json"#,
+            arrs_json
+        );
+
+        if let Err(e) = ssh::execute_command(host, username, private_key, &update_arrs_cmd).await {
+            println!("[Config] Decypharr: Failed to update arrs config: {}", e);
+        } else {
+            println!("[Config] Decypharr: arrs array configured successfully");
+            // Redémarrer Decypharr pour appliquer les changements
+            ssh::execute_command(host, username, private_key, "docker restart decypharr > /dev/null 2>&1 &").await.ok();
+        }
     }
 
     // 8.4b: Ajouter les Root Folders
@@ -1500,7 +1549,7 @@ pub async fn run_full_installation(
             let sync_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/applications' \
                 -H 'X-Api-Key: {}' \
                 -H 'Content-Type: application/json' \
-                -d '{{"name": "Radarr", "syncLevel": "fullSync", "implementation": "Radarr", "configContract": "RadarrSettings", "fields": [{{"name": "prowlarrUrl", "value": "http://localhost:9696"}}, {{"name": "baseUrl", "value": "http://localhost:7878"}}, {{"name": "apiKey", "value": "{}"}}]}}'"#, prowlarr_api, radarr_api);
+                -d '{{"enable": true, "name": "Radarr", "syncLevel": "fullSync", "implementation": "Radarr", "configContract": "RadarrSettings", "fields": [{{"name": "prowlarrUrl", "value": "http://localhost:9696"}}, {{"name": "baseUrl", "value": "http://localhost:7878"}}, {{"name": "apiKey", "value": "{}"}}]}}'"#, prowlarr_api, radarr_api);
             ssh::execute_command(host, username, private_key, &sync_radarr_cmd).await.ok();
         }
 
@@ -1508,7 +1557,7 @@ pub async fn run_full_installation(
             let sync_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:9696/api/v1/applications' \
                 -H 'X-Api-Key: {}' \
                 -H 'Content-Type: application/json' \
-                -d '{{"name": "Sonarr", "syncLevel": "fullSync", "implementation": "Sonarr", "configContract": "SonarrSettings", "fields": [{{"name": "prowlarrUrl", "value": "http://localhost:9696"}}, {{"name": "baseUrl", "value": "http://localhost:8989"}}, {{"name": "apiKey", "value": "{}"}}]}}'"#, prowlarr_api, sonarr_api);
+                -d '{{"enable": true, "name": "Sonarr", "syncLevel": "fullSync", "implementation": "Sonarr", "configContract": "SonarrSettings", "fields": [{{"name": "prowlarrUrl", "value": "http://localhost:9696"}}, {{"name": "baseUrl", "value": "http://localhost:8989"}}, {{"name": "apiKey", "value": "{}"}}]}}'"#, prowlarr_api, sonarr_api);
             ssh::execute_command(host, username, private_key, &sync_sonarr_cmd).await.ok();
         }
     }
@@ -1537,14 +1586,14 @@ pub async fn run_full_installation(
         if !bazarr_api_check.is_empty() {
             let bazarr_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
                 -H 'X-API-KEY: {}' -H 'Content-Type: application/json' \
-                -d '{{"settings": {{"radarr": {{"ip": "localhost", "port": 7878, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
-                bazarr_api_check, radarr_api);
+                -d '{{"settings": {{"radarr": {{"ip": "{}", "port": 7878, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, pi_ip, radarr_api);
             ssh::execute_command(host, username, private_key, &bazarr_radarr_cmd).await.ok();
 
             let bazarr_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
                 -H 'X-API-KEY: {}' -H 'Content-Type: application/json' \
-                -d '{{"settings": {{"sonarr": {{"ip": "localhost", "port": 8989, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
-                bazarr_api_check, sonarr_api);
+                -d '{{"settings": {{"sonarr": {{"ip": "{}", "port": 8989, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, pi_ip, sonarr_api);
             ssh::execute_command(host, username, private_key, &bazarr_sonarr_cmd).await.ok();
             println!("[Config] Bazarr: Configured");
         }
@@ -3149,6 +3198,7 @@ pub async fn run_full_installation_password(
                 -H 'X-Api-Key: {}' \
                 -H 'Content-Type: application/json' \
                 -d '{{
+                    "enable": true,
                     "name": "Radarr",
                     "syncLevel": "fullSync",
                     "implementation": "Radarr",
@@ -3169,6 +3219,7 @@ pub async fn run_full_installation_password(
                 -H 'X-Api-Key: {}' \
                 -H 'Content-Type: application/json' \
                 -d '{{
+                    "enable": true,
                     "name": "Sonarr",
                     "syncLevel": "fullSync",
                     "implementation": "Sonarr",
@@ -3209,20 +3260,24 @@ pub async fn run_full_installation_password(
         ).await.unwrap_or_default().trim().to_string();
 
         if !bazarr_api_check.is_empty() {
+            // Récupérer l'IP du Pi pour Bazarr
+            let pi_ip = ssh::execute_command_password(host, username, password, "hostname -I | awk '{print $1}'")
+                .await.unwrap_or_else(|_| host.to_string()).trim().to_string();
+
             // Configurer Radarr dans Bazarr
             let bazarr_radarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
                 -H 'X-API-KEY: {}' \
                 -H 'Content-Type: application/json' \
-                -d '{{"settings": {{"radarr": {{"ip": "localhost", "port": 7878, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
-                bazarr_api_check, radarr_api);
+                -d '{{"settings": {{"radarr": {{"ip": "{}", "port": 7878, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, pi_ip, radarr_api);
             ssh::execute_command_password(host, username, password, &bazarr_radarr_cmd).await.ok();
 
             // Configurer Sonarr dans Bazarr
             let bazarr_sonarr_cmd = format!(r#"curl -s -X POST 'http://localhost:6767/api/system/settings' \
                 -H 'X-API-KEY: {}' \
                 -H 'Content-Type: application/json' \
-                -d '{{"settings": {{"sonarr": {{"ip": "localhost", "port": 8989, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
-                bazarr_api_check, sonarr_api);
+                -d '{{"settings": {{"sonarr": {{"ip": "{}", "port": 8989, "apikey": "{}", "ssl": false, "base_url": ""}}}}}}"#,
+                bazarr_api_check, pi_ip, sonarr_api);
             ssh::execute_command_password(host, username, password, &bazarr_sonarr_cmd).await.ok();
             println!("[Config] Bazarr: Radarr and Sonarr configured");
         }
