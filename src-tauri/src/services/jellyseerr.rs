@@ -173,7 +173,7 @@ echo "✅ Radarr and Sonarr configured via API"
         host,
         username,
         password,
-        api_config_script
+        &api_config_script
     ).await?;
 
     println!("[Jellyseerr] ✅ Radarr and Sonarr configured via API");
