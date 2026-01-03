@@ -2261,8 +2261,39 @@ pub async fn run_full_installation_password(
     logger.start_step("docker_compose_up").await;
     emit_progress(&window, "compose_up", 74, "Démarrage des conteneurs...", None);
 
+    // Lancer en background car ça peut prendre 10+ minutes
+    ssh::execute_command_password(host, username, password,
+        "cd ~/media-stack && nohup docker compose up -d > /tmp/compose_up.log 2>&1 &"
+    ).await?;
+
+    // Attendre que la commande soit terminée (vérifier le fichier de lock Docker)
+    println!("[Install] Waiting for docker compose up to complete...");
+    for i in 0..600 {  // Max 10 minutes
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+        if i % 10 == 0 {
+            emit_progress(&window, "compose_up", 74 + (i / 30),
+                &format!("Démarrage des conteneurs... ({}s)", i), None);
+        }
+
+        // Vérifier si docker compose est terminé en checkant les containers
+        match ssh::execute_command_password(host, username, password,
+            "docker ps --format '{{.Names}}' 2>/dev/null | grep -E 'jellyfin|radarr|sonarr' | wc -l"
+        ).await {
+            Ok(output) => {
+                if let Ok(count) = output.trim().parse::<i32>() {
+                    if count >= 3 {
+                        println!("[Install] Docker compose up completed ({} containers running)", count);
+                        break;
+                    }
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
     let compose_up_result = ssh::execute_command_password(host, username, password,
-        "cd ~/media-stack && docker compose up -d 2>&1"
+        "cat /tmp/compose_up.log 2>/dev/null || echo 'Log not found'"
     ).await;
 
     let compose_up_success = compose_up_result.is_ok();

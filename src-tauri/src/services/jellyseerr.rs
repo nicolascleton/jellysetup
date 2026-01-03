@@ -85,46 +85,82 @@ echo "✅ Jellyseerr database cleaned and service started"
         host,
         username,
         password,
-        "sleep 20"
+        "sleep 40"
     ).await?;
 
     // Créer l'utilisateur admin directement dans la DB via docker exec
     // IMPORTANT: On utilise docker exec avec un container Alpine qui a sqlite3
     // On génère le hash bcrypt du password Jellyfin
+    // Créer un script Python qui sera écrit dans le container
+    let python_script = format!(r#"import bcrypt
+import sqlite3
+import time
+import sys
+
+print('🔍 Waiting for Jellyseerr to create user table...', flush=True)
+
+# Attendre que la table user existe (max 60 secondes)
+db_ready = False
+for i in range(60):
+    try:
+        conn = sqlite3.connect('/config/db.sqlite3')
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user'")
+        if cursor.fetchone():
+            db_ready = True
+            print(f'✓ User table found after {{i+1}} seconds', flush=True)
+            break
+        conn.close()
+    except Exception as e:
+        pass
+
+    if i % 5 == 0 and i > 0:
+        print(f'⏳ Still waiting... ({{i}}s elapsed)', flush=True)
+    time.sleep(1)
+
+if not db_ready:
+    print('❌ ERROR: user table not created after 60s', flush=True)
+    exit(1)
+
+print('🔐 Generating bcrypt hash...', flush=True)
+# Hash du password
+password_hash = bcrypt.hashpw(b'{}', bcrypt.gensalt(rounds=10)).decode()
+
+print('📝 Inserting admin user into database...', flush=True)
+# Créer l'utilisateur admin
+cursor.execute('''
+INSERT OR REPLACE INTO user (id, email, username, password, userType, permissions, avatar, createdAt, updatedAt)
+VALUES (1, ?, ?, ?, 1, 16383, '', datetime('now'), datetime('now'))
+''', ('{}', '{}', password_hash))
+
+conn.commit()
+conn.close()
+
+print('✅ Admin user created: {} / {}', flush=True)
+"#, jellyfin_password, admin_email, jellyfin_username, admin_email, jellyfin_username);
+
     let create_admin_script = format!(r#"
 # Attendre que Jellyseerr crée la DB
 sleep 5
 
 # Créer l'utilisateur admin via docker exec avec sqlite3 + bcrypt
-# On monte le répertoire jellyseerr directement depuis media-stack
 cd ~/media-stack
 
-docker run --rm -v "$(pwd)/jellyseerr/config:/config" alpine sh -c "
+# Écrire le script Python dans un fichier temporaire
+cat > /tmp/create_jellyseerr_admin.py <<'PYTHON_EOF'
+{}
+PYTHON_EOF
+
+# Exécuter le script dans le container Alpine
+docker run --rm -v "$(pwd)/jellyseerr/config:/config" -v /tmp/create_jellyseerr_admin.py:/script.py alpine sh -c "
   apk add --no-cache sqlite python3 py3-pip >/dev/null 2>&1
   pip3 install --break-system-packages bcrypt >/dev/null 2>&1
-
-  # Générer le hash bcrypt du password Jellyfin
-  PASSWORD_HASH=\$(python3 -c 'import bcrypt; print(bcrypt.hashpw(b\"{}\", bcrypt.gensalt(rounds=10)).decode())')
-
-  # Créer l'utilisateur admin avec les credentials Jellyfin
-  sqlite3 /config/db.sqlite3 <<SQL
-INSERT OR REPLACE INTO user (id, email, username, password, userType, permissions, avatar, createdAt, updatedAt)
-VALUES (
-  1,
-  '{}',
-  '{}',
-  '\$PASSWORD_HASH',
-  1,
-  16383,
-  '',
-  datetime('now'),
-  datetime('now')
-);
-SQL
-
-  echo '✅ Admin user created: {} / {}'
+  python3 /script.py
 "
-"#, jellyfin_password, admin_email, jellyfin_username, admin_email, jellyfin_username);
+
+# Nettoyer
+rm /tmp/create_jellyseerr_admin.py
+"#, python_script);
 
     ssh::execute_command_password(
         host,
