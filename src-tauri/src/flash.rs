@@ -1595,6 +1595,73 @@ pub async fn run_full_installation(
             let init_result = ssh::execute_command(host, username, private_key, init_cmd).await.unwrap_or_default();
             println!("[Config] Jellyseerr: Initialize result: {}", init_result);
 
+            // Configurer Radarr et Sonarr dans Jellyseerr
+            println!("[Config] Jellyseerr: Configuring Radarr and Sonarr...");
+
+            // Récupérer les API keys de Radarr et Sonarr
+            let radarr_api_key = ssh::execute_command(host, username, private_key,
+                "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/radarr/config.xml 2>/dev/null || echo ''"
+            ).await.unwrap_or_default().trim().to_string();
+
+            let sonarr_api_key = ssh::execute_command(host, username, private_key,
+                "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/sonarr/config.xml 2>/dev/null || echo ''"
+            ).await.unwrap_or_default().trim().to_string();
+
+            if !radarr_api_key.is_empty() && !sonarr_api_key.is_empty() {
+                let jellyseerr_config = format!(r#"
+# Récupérer l'API key de Jellyseerr depuis settings.json
+API_KEY=$(cat ~/media-stack/jellyseerr/config/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Attendre que Jellyseerr soit prêt
+sleep 5
+
+# Configurer Radarr via l'API
+curl -s -X POST "http://localhost:5055/api/v1/settings/radarr" \
+  -H "X-Api-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "name": "Radarr",
+    "hostname": "radarr",
+    "port": 7878,
+    "apiKey": "{}",
+    "useSsl": false,
+    "activeProfileId": 4,
+    "activeProfileName": "HD-1080p",
+    "activeDirectory": "/mnt/decypharr/movies",
+    "is4k": false,
+    "minimumAvailability": "released",
+    "isDefault": true,
+    "syncEnabled": true
+  }}'
+
+# Configurer Sonarr via l'API
+curl -s -X POST "http://localhost:5055/api/v1/settings/sonarr" \
+  -H "X-Api-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "name": "Sonarr",
+    "hostname": "sonarr",
+    "port": 8989,
+    "apiKey": "{}",
+    "useSsl": false,
+    "activeProfileId": 4,
+    "activeProfileName": "HD-1080p",
+    "activeDirectory": "/mnt/decypharr/tv",
+    "is4k": false,
+    "enableSeasonFolders": true,
+    "isDefault": true,
+    "syncEnabled": true
+  }}'
+
+echo "✅ Radarr and Sonarr configured in Jellyseerr"
+"#, radarr_api_key, sonarr_api_key);
+
+                ssh::execute_command(host, username, private_key, &jellyseerr_config).await.ok();
+                println!("[Config] Jellyseerr: ✅ Radarr and Sonarr configured");
+            } else {
+                println!("[Config] Jellyseerr: ⚠️  Could not get Radarr/Sonarr API keys");
+            }
+
             // Nettoyer les cookies
             ssh::execute_command(host, username, private_key, "rm -f /tmp/jellyseerr_cookies.txt").await.ok();
 
@@ -3168,6 +3235,73 @@ pub async fn run_full_installation_password(
             let init_cmd = "curl -s -X POST 'http://localhost:5055/api/v1/settings/initialize' -b /tmp/jellyseerr_cookies.txt -H 'Content-Type: application/json'";
             let init_result = ssh::execute_command_password(host, username, password, init_cmd).await.unwrap_or_default();
             println!("[Config] Jellyseerr: Initialize result: {}", init_result);
+
+            // Configurer Radarr et Sonarr dans Jellyseerr
+            println!("[Config] Jellyseerr: Configuring Radarr and Sonarr...");
+
+            // Récupérer les API keys de Radarr et Sonarr
+            let radarr_api_key = ssh::execute_command_password(host, username, password,
+                "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/radarr/config.xml 2>/dev/null || echo ''"
+            ).await.unwrap_or_default().trim().to_string();
+
+            let sonarr_api_key = ssh::execute_command_password(host, username, password,
+                "grep -oP '(?<=<ApiKey>)[^<]+' ~/media-stack/sonarr/config.xml 2>/dev/null || echo ''"
+            ).await.unwrap_or_default().trim().to_string();
+
+            if !radarr_api_key.is_empty() && !sonarr_api_key.is_empty() {
+                let jellyseerr_config = format!(r#"
+# Récupérer l'API key de Jellyseerr depuis settings.json
+API_KEY=$(cat ~/media-stack/jellyseerr/config/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Attendre que Jellyseerr soit prêt
+sleep 5
+
+# Configurer Radarr via l'API
+curl -s -X POST "http://localhost:5055/api/v1/settings/radarr" \
+  -H "X-Api-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "name": "Radarr",
+    "hostname": "radarr",
+    "port": 7878,
+    "apiKey": "{}",
+    "useSsl": false,
+    "activeProfileId": 4,
+    "activeProfileName": "HD-1080p",
+    "activeDirectory": "/mnt/decypharr/movies",
+    "is4k": false,
+    "minimumAvailability": "released",
+    "isDefault": true,
+    "syncEnabled": true
+  }}'
+
+# Configurer Sonarr via l'API
+curl -s -X POST "http://localhost:5055/api/v1/settings/sonarr" \
+  -H "X-Api-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{{
+    "name": "Sonarr",
+    "hostname": "sonarr",
+    "port": 8989,
+    "apiKey": "{}",
+    "useSsl": false,
+    "activeProfileId": 4,
+    "activeProfileName": "HD-1080p",
+    "activeDirectory": "/mnt/decypharr/tv",
+    "is4k": false,
+    "enableSeasonFolders": true,
+    "isDefault": true,
+    "syncEnabled": true
+  }}'
+
+echo "✅ Radarr and Sonarr configured in Jellyseerr"
+"#, radarr_api_key, sonarr_api_key);
+
+                ssh::execute_command_password(host, username, password, &jellyseerr_config).await.ok();
+                println!("[Config] Jellyseerr: ✅ Radarr and Sonarr configured");
+            } else {
+                println!("[Config] Jellyseerr: ⚠️  Could not get Radarr/Sonarr API keys");
+            }
 
             // Nettoyer les cookies
             ssh::execute_command_password(host, username, password, "rm -f /tmp/jellyseerr_cookies.txt").await.ok();
