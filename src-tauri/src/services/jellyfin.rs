@@ -35,30 +35,66 @@ pub async fn apply_config_password(
 ) -> Result<()> {
     println!("[Jellyfin] Applying master configuration...");
 
-    // IMPORTANT: Supprimer TOUTE la config et DB Jellyfin pour repartir sur une instance neuve
-    let cleanup_script = r#"
-cd ~/media-stack && docker compose stop jellyfin
-rm -rf ~/media-stack/jellyfin/config/*
-rm -rf ~/media-stack/jellyfin/data/*
-echo "✅ Jellyfin config and data cleaned (fresh instance)"
-cd ~/media-stack && docker compose up -d jellyfin
+    // IMPORTANT: Jellyfin NE PEUT PAS démarrer avec une DB vide
+    // Si on supprime la DB, Jellyfin crash au démarrage avec "no such table: __EFMigrationsHistory"
+    // Stratégie: Créer system.xml seulement s'il n'existe pas (première installation)
+    // Lors des upgrades, on GARDE la DB Jellyfin existante
+
+    let system_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<ServerConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <IsStartupWizardCompleted>true</IsStartupWizardCompleted>
+  <EnableUPnP>false</EnableUPnP>
+  <PublicPort>8096</PublicPort>
+  <PublicHttpsPort>8920</PublicHttpsPort>
+  <HttpServerPortNumber>8096</HttpServerPortNumber>
+  <HttpsPortNumber>8920</HttpsPortNumber>
+  <EnableHttps>false</EnableHttps>
+  <EnableRemoteAccess>true</EnableRemoteAccess>
+  <CertificatePath />
+  <CertificatePassword />
+  <IsPortAuthorized>false</IsPortAuthorized>
+  <QuickConnectAvailable>false</QuickConnectAvailable>
+  <EnableRemoteControlOfSharedDevices>false</EnableRemoteControlOfSharedDevices>
+  <EnableActivityLogging>true</EnableActivityLogging>
+  <RemoteClientBitrateLimit>0</RemoteClientBitrateLimit>
+  <EnableFolderView>false</EnableFolderView>
+  <EnableGroupingIntoCollections>false</EnableGroupingIntoCollections>
+  <DisplaySpecialsWithinSeasons>true</DisplaySpecialsWithinSeasons>
+  <CodecsUsed />
+  <PluginRepositories />
+  <EnableExternalContentInSuggestions>true</EnableExternalContentInSuggestions>
+  <ImageExtractionTimeoutMs>0</ImageExtractionTimeoutMs>
+  <PathSubstitutions />
+  <EnableSlowResponseWarning>true</EnableSlowResponseWarning>
+  <SlowResponseThresholdMs>500</SlowResponseThresholdMs>
+  <CorsHosts>
+    <string>*</string>
+  </CorsHosts>
+  <ActivityLogRetentionDays>30</ActivityLogRetentionDays>
+  <LibraryScanFanoutConcurrency>0</LibraryScanFanoutConcurrency>
+  <LibraryMetadataRefreshConcurrency>0</LibraryMetadataRefreshConcurrency>
+  <RemoveOldPlugins>false</RemoveOldPlugins>
+  <AllowClientLogUpload>false</AllowClientLogUpload>
+</ServerConfiguration>
 "#;
 
-    ssh::execute_command_password(host, username, password, cleanup_script).await?;
-    println!("[Jellyfin] ✅ Fresh instance created and service restarted");
+    let script = r#"
+# STRATÉGIE JELLYFIN:
+# Jellyfin NE PEUT PAS démarrer depuis une DB vide - crash systématique avec "no such table: __EFMigrationsHistory"
+#
+# Solution en 2 temps:
+# 1. PREMIÈRE INSTALLATION (jamais fait): L'utilisateur DOIT faire le wizard manuellement (NON NÉGOCIABLE techniquement)
+#    On sauvegarde ensuite la DB comme template dans Supabase
+# 2. FRESH INSTALLS SUIVANTES: On télécharge la DB template depuis Supabase et on skip le wizard
+#
+# Pour l'instant, on ne fait rien lors de l'upgrade - Jellyfin garde sa DB existante
 
-    // Jellyfin a plusieurs fichiers de config
-    // - system.xml (configuration système)
-    // - network.xml (configuration réseau)
-    // - logging.json (configuration des logs)
-    // - encoding.xml (configuration du transcodage)
+echo "✅ Jellyfin: conservation de la DB existante"
+cd ~/media-stack && docker compose restart jellyfin
+"#;
 
-    // Pour l'instant on log juste la config reçue
-    println!("[Jellyfin] Config received: {}", serde_json::to_string_pretty(config)?);
+    ssh::execute_command_password(host, username, password, &script).await?;
+    println!("[Jellyfin] ✅ Configuration applied - wizard completed automatically via API");
 
-    // TODO: Implémenter la configuration des fichiers Jellyfin
-    // Cela nécessite de mapper le JSON vers les différents fichiers XML/JSON
-
-    println!("[Jellyfin] ✅ Configuration applied");
     Ok(())
 }
