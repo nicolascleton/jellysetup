@@ -1256,31 +1256,65 @@ pub async fn run_full_installation(
         let ad_key = config.alldebrid_api_key.replace("\\", "\\\\").replace("\"", "\\\"");
 
         let decypharr_config = format!(r#"{{
+  "url_base": "/",
   "port": "8282",
-  "qbit": {{
-    "port": 8282,
-    "username": "",
-    "password": "",
-    "download_folder": "/mnt/decypharr/qbit/downloads",
-    "categories": {{
-      "radarr": "/mnt/decypharr/movies",
-      "sonarr": "/mnt/decypharr/tv"
-    }}
-  }},
+  "log_level": "info",
   "debrids": [
     {{
       "name": "alldebrid",
-      "enabled": true,
       "api_key": "{}",
-      "folder": "/mnt/decypharr/alldebrid",
-      "download_uncached": true
+      "download_api_keys": ["{}"],
+      "folder": "/mnt/decypharr/alldebrid/__all__",
+      "rate_limit": "250/minute",
+      "unpack_rar": true,
+      "minimum_free_slot": 1,
+      "use_webdav": true,
+      "torrents_refresh_interval": "15s",
+      "download_links_refresh_interval": "40m",
+      "workers": 200,
+      "auto_expire_links_after": "3d",
+      "folder_naming": "arr"
     }}
   ],
+  "qbittorrent": {{
+    "download_folder": "/mnt/decypharr/qbit",
+    "refresh_interval": 15,
+    "skip_pre_cache": true
+  }},
+  "arrs": [],
   "repair": {{
     "enabled": true,
-    "interval": "1h"
-  }}
-}}"#, ad_key);
+    "auto_process": true,
+    "use_webdav": true,
+    "workers": 100,
+    "strategy": "per_torrent",
+    "reinsert": true,
+    "interval": "5m"
+  }},
+  "webdav": {{}},
+  "rclone": {{
+    "enabled": true,
+    "mount_path": "/mnt/decypharr",
+    "rc_port": "5572",
+    "vfs_cache_mode": "full",
+    "vfs_cache_max_size": "10G",
+    "vfs_cache_max_age": "2h",
+    "vfs_cache_poll_interval": "1m",
+    "vfs_read_chunk_size": "64M",
+    "vfs_read_chunk_size_limit": "128M",
+    "vfs_read_ahead": "512M",
+    "buffer_size": "64M",
+    "async_read": true,
+    "transfers": 2,
+    "uid": 1000,
+    "gid": 1000,
+    "attr_timeout": "1s",
+    "dir_cache_time": "10s",
+    "log_level": "INFO"
+  }},
+  "allowed_file_types": ["3gp","ac3","aiff","alac","amr","ape","asf","asx","avc","avi","bin","bivx","dat","divx","dts","dv","dvr-ms","flac","fli","flv","ifo","m2ts","m2v","m3u","m4a","m4p","m4v","mid","midi","mk3d","mka","mkv","mov","mp2","mp3","mp4","mpa","mpeg","mpg","nrg","nsv","nuv","ogg","ogm","ogv","pva","qt","ra","rm","rmvb","strm","svq3","ts","ty","viv","vob","voc","vp3","wav","webm","wma","wmv","wpl","wtv","wv","xvid"],
+  "use_auth": true
+}}"#, ad_key, ad_key);
 
         let write_config_cmd = format!(
             "cat > ~/media-stack/decypharr/config.json << 'EOFDECYPHARR'\n{}\nEOFDECYPHARR",
@@ -2803,31 +2837,65 @@ pub async fn run_full_installation_password(
 
         // Créer le config.json pour Decypharr
         let decypharr_config = format!(r#"{{
+  "url_base": "/",
   "port": "8282",
-  "qbit": {{
-    "port": 8282,
-    "username": "",
-    "password": "",
-    "download_folder": "/mnt/decypharr/qbit/downloads",
-    "categories": {{
-      "radarr": "/mnt/decypharr/movies",
-      "sonarr": "/mnt/decypharr/tv"
-    }}
-  }},
+  "log_level": "info",
   "debrids": [
     {{
       "name": "alldebrid",
-      "enabled": true,
       "api_key": "{}",
-      "folder": "/mnt/decypharr/alldebrid",
-      "download_uncached": true
+      "download_api_keys": ["{}"],
+      "folder": "/mnt/decypharr/alldebrid/__all__",
+      "rate_limit": "250/minute",
+      "unpack_rar": true,
+      "minimum_free_slot": 1,
+      "use_webdav": true,
+      "torrents_refresh_interval": "15s",
+      "download_links_refresh_interval": "40m",
+      "workers": 200,
+      "auto_expire_links_after": "3d",
+      "folder_naming": "arr"
     }}
   ],
+  "qbittorrent": {{
+    "download_folder": "/mnt/decypharr/qbit",
+    "refresh_interval": 15,
+    "skip_pre_cache": true
+  }},
+  "arrs": [],
   "repair": {{
     "enabled": true,
-    "interval": "1h"
-  }}
-}}"#, ad_key);
+    "auto_process": true,
+    "use_webdav": true,
+    "workers": 100,
+    "strategy": "per_torrent",
+    "reinsert": true,
+    "interval": "5m"
+  }},
+  "webdav": {{}},
+  "rclone": {{
+    "enabled": true,
+    "mount_path": "/mnt/decypharr",
+    "rc_port": "5572",
+    "vfs_cache_mode": "full",
+    "vfs_cache_max_size": "10G",
+    "vfs_cache_max_age": "2h",
+    "vfs_cache_poll_interval": "1m",
+    "vfs_read_chunk_size": "64M",
+    "vfs_read_chunk_size_limit": "128M",
+    "vfs_read_ahead": "512M",
+    "buffer_size": "64M",
+    "async_read": true,
+    "transfers": 2,
+    "uid": 1000,
+    "gid": 1000,
+    "attr_timeout": "1s",
+    "dir_cache_time": "10s",
+    "log_level": "INFO"
+  }},
+  "allowed_file_types": ["3gp","ac3","aiff","alac","amr","ape","asf","asx","avc","avi","bin","bivx","dat","divx","dts","dv","dvr-ms","flac","fli","flv","ifo","m2ts","m2v","m3u","m4a","m4p","m4v","mid","midi","mk3d","mka","mkv","mov","mp2","mp3","mp4","mpa","mpeg","mpg","nrg","nsv","nuv","ogg","ogm","ogv","pva","qt","ra","rm","rmvb","strm","svq3","ts","ty","viv","vob","voc","vp3","wav","webm","wma","wmv","wpl","wtv","wv","xvid"],
+  "use_auth": true
+}}"#, ad_key, ad_key);
 
         let write_config_cmd = format!(
             "cat > ~/media-stack/decypharr/config.json << 'EOFDECYPHARR'\n{}\nEOFDECYPHARR",
