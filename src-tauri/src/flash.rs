@@ -2268,13 +2268,11 @@ pub async fn run_full_installation_password(
 
     // Attendre que la commande soit terminée (vérifier le fichier de lock Docker)
     println!("[Install] Waiting for docker compose up to complete...");
-    for i in 0..600 {  // Max 10 minutes
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    for i in 0..60 {  // Max 10 minutes (60 * 10s = 600s)
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-        if i % 10 == 0 {
-            emit_progress(&window, "compose_up", 74 + (i / 30),
-                &format!("Démarrage des conteneurs... ({}s)", i), None);
-        }
+        emit_progress(&window, "compose_up", 74 + (i as u32 / 3),
+            &format!("Démarrage des conteneurs... ({}s)", i * 10), None);
 
         // Vérifier si docker compose est terminé en checkant les containers
         match ssh::execute_command_password(host, username, password,

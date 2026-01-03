@@ -81,12 +81,26 @@ echo "✅ Jellyseerr database cleaned and service started"
 
     // Attendre que Jellyseerr démarre et crée la base de données
     println!("[Jellyseerr] Waiting for database initialization...");
-    ssh::execute_command_password(
-        host,
-        username,
-        password,
-        "sleep 40"
-    ).await?;
+    let mut jellyseerr_ready = false;
+    for i in 0..24 {  // Max 2 minutes (24 * 5s)
+        // Vérifier si la table user existe dans la DB
+        let check = ssh::execute_command_password(host, username, password,
+            "cd ~/media-stack && docker run --rm -v \"$(pwd)/jellyseerr/config:/config\" alpine sh -c 'apk add --no-cache sqlite >/dev/null 2>&1 && sqlite3 /config/db.sqlite3 \"SELECT name FROM sqlite_master WHERE type=\\\"table\\\" AND name=\\\"user\\\";\"' 2>/dev/null || echo 'TABLE_NOT_FOUND'"
+        ).await.unwrap_or_default();
+
+        println!("[Jellyseerr] Check {}/24: {}", i + 1, if check.contains("user") { "user table found" } else { "waiting..." });
+
+        if check.trim() == "user" {
+            jellyseerr_ready = true;
+            println!("[Jellyseerr] ✅ Database ready after {} seconds", (i + 1) * 5);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    if !jellyseerr_ready {
+        return Err(anyhow::anyhow!("Jellyseerr database not initialized after 120 seconds"));
+    }
 
     // Créer l'utilisateur admin directement dans la DB via docker exec
     // IMPORTANT: On utilise docker exec avec un container Alpine qui a sqlite3
@@ -94,39 +108,16 @@ echo "✅ Jellyseerr database cleaned and service started"
     // Créer un script Python qui sera écrit dans le container
     let python_script = format!(r#"import bcrypt
 import sqlite3
-import time
-import sys
 
-print('🔍 Waiting for Jellyseerr to create user table...', flush=True)
-
-# Attendre que la table user existe (max 60 secondes)
-db_ready = False
-for i in range(60):
-    try:
-        conn = sqlite3.connect('/config/db.sqlite3')
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user'")
-        if cursor.fetchone():
-            db_ready = True
-            print(f'✓ User table found after {{i+1}} seconds', flush=True)
-            break
-        conn.close()
-    except Exception as e:
-        pass
-
-    if i % 5 == 0 and i > 0:
-        print(f'⏳ Still waiting... ({{i}}s elapsed)', flush=True)
-    time.sleep(1)
-
-if not db_ready:
-    print('❌ ERROR: user table not created after 60s', flush=True)
-    exit(1)
-
-print('🔐 Generating bcrypt hash...', flush=True)
+print('🔐 Generating bcrypt hash for admin password...', flush=True)
 # Hash du password
 password_hash = bcrypt.hashpw(b'{}', bcrypt.gensalt(rounds=10)).decode()
 
 print('📝 Inserting admin user into database...', flush=True)
+# Connexion à la DB (on sait qu'elle existe grâce au wait loop Rust)
+conn = sqlite3.connect('/config/db.sqlite3')
+cursor = conn.cursor()
+
 # Créer l'utilisateur admin
 cursor.execute('''
 INSERT OR REPLACE INTO user (id, email, username, password, userType, permissions, avatar, createdAt, updatedAt)
@@ -140,9 +131,6 @@ print('✅ Admin user created: {} / {}', flush=True)
 "#, jellyfin_password, admin_email, jellyfin_username, admin_email, jellyfin_username);
 
     let create_admin_script = format!(r#"
-# Attendre que Jellyseerr crée la DB
-sleep 5
-
 # Créer l'utilisateur admin via docker exec avec sqlite3 + bcrypt
 cd ~/media-stack
 

@@ -86,9 +86,9 @@ impl PersistentSession {
         };
         println!("[SSH-P #{}] {}", self.command_count, cmd_preview);
 
-        // Ouvrir un channel pour cette commande - timeout plus long
+        // Ouvrir un channel pour cette commande - timeout court pour fail fast
         let mut channel = match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(5),
             self.session.channel_open_session()
         ).await {
             Ok(Ok(ch)) => ch,
