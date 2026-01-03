@@ -85,6 +85,25 @@ echo "✅ Jellyseerr completely cleaned and service started"
     println!("[Jellyseerr] Waiting for API to be ready...");
     let mut jellyseerr_ready = false;
     for i in 0..36 {  // Max 3 minutes (36 * 5s)
+        // Vérifier d'abord si le container tourne
+        let container_status = ssh::execute_command_password(host, username, password,
+            "docker ps -a --filter name=jellyseerr --format '{{.Status}}' 2>/dev/null"
+        ).await.unwrap_or_default();
+
+        // Si le container a crashé ou est arrêté
+        if container_status.contains("Exited") || container_status.contains("Dead") {
+            let logs = ssh::execute_command_password(host, username, password,
+                "docker logs jellyseerr --tail 20 2>&1"
+            ).await.unwrap_or_default();
+
+            return Err(anyhow::anyhow!(
+                "Jellyseerr container crashed or exited unexpectedly!\n\nContainer status: {}\n\nLast logs:\n{}",
+                container_status.trim(),
+                logs
+            ));
+        }
+
+        // Tester l'API
         let check = ssh::execute_command_password(host, username, password,
             "curl -s 'http://localhost:5055/api/v1/status' 2>/dev/null || echo 'API_ERROR'"
         ).await.unwrap_or_default();
@@ -100,7 +119,15 @@ echo "✅ Jellyseerr completely cleaned and service started"
     }
 
     if !jellyseerr_ready {
-        return Err(anyhow::anyhow!("Jellyseerr API not ready after 180 seconds (3 minutes). The container might have crashed or requires more resources."));
+        // Récupérer les logs pour diagnostic
+        let logs = ssh::execute_command_password(host, username, password,
+            "docker logs jellyseerr --tail 30 2>&1"
+        ).await.unwrap_or_default();
+
+        return Err(anyhow::anyhow!(
+            "Jellyseerr API not ready after 180 seconds (3 minutes).\n\nPossible causes:\n- Container taking too long to start\n- Insufficient resources (RAM/CPU)\n- Configuration error\n\nLast logs:\n{}",
+            logs
+        ));
     }
 
     // WORKFLOW COMPLET comme Buildarr:
