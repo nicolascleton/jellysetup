@@ -1233,7 +1233,7 @@ pub async fn run_full_installation(
 
                 // Créer bibliothèque Films avec LibraryOptions.PathInfos (OBLIGATOIRE pour avoir un ItemId!)
                 let movies_lib_cmd = format!(
-                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/decypharr/movies\"}}]}}}}'",
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=Films&collectionType=movies&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/media/movies\"}}]}}}}'",
                     jellyfin_token
                 );
                 ssh::execute_command(host, username, private_key, &movies_lib_cmd).await.ok();
@@ -1241,7 +1241,7 @@ pub async fn run_full_installation(
 
                 // Créer bibliothèque Séries avec LibraryOptions.PathInfos
                 let tv_lib_cmd = format!(
-                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=S%C3%A9ries&collectionType=tvshows&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/decypharr/tv\"}}]}}}}'",
+                    "curl -s -X POST 'http://localhost:8096/Library/VirtualFolders?name=S%C3%A9ries&collectionType=tvshows&refreshLibrary=true' -H 'X-Emby-Token: {}' -H 'Content-Type: application/json' -d '{{\"LibraryOptions\":{{\"PathInfos\":[{{\"Path\":\"/mnt/media/series\"}}]}}}}'",
                     jellyfin_token
                 );
                 ssh::execute_command(host, username, private_key, &tv_lib_cmd).await.ok();
@@ -1460,14 +1460,14 @@ pub async fn run_full_installation(
     if !radarr_api.is_empty() {
         let radarr_root_cmd = format!(r#"curl -s -X POST 'http://localhost:7878/api/v3/rootfolder' \
             -H 'X-Api-Key: {}' -H 'Content-Type: application/json' \
-            -d '{{"path": "/mnt/decypharr/movies"}}'"#, radarr_api);
+            -d '{{"path": "/mnt/media/movies"}}'"#, radarr_api);
         ssh::execute_command(host, username, private_key, &radarr_root_cmd).await.ok();
     }
 
     if !sonarr_api.is_empty() {
         let sonarr_root_cmd = format!(r#"curl -s -X POST 'http://localhost:8989/api/v3/rootfolder' \
             -H 'X-Api-Key: {}' -H 'Content-Type: application/json' \
-            -d '{{"path": "/mnt/decypharr/tv"}}'"#, sonarr_api);
+            -d '{{"path": "/mnt/media/series"}}'"#, sonarr_api);
         ssh::execute_command(host, username, private_key, &sonarr_root_cmd).await.ok();
     }
 
