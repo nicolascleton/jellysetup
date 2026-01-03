@@ -35,9 +35,13 @@ pub async fn apply_config_password(
     println!("[Radarr] Applying master configuration...");
 
     // IMPORTANT: Supprimer la DB Radarr pour repartir sur une base propre
+    // Utiliser docker run avec Alpine pour éviter sudo
     let cleanup_script = r#"
 cd ~/media-stack && docker compose stop radarr
-rm -f ~/media-stack/radarr/radarr.db*
+
+# Supprimer la DB via docker run (évite sudo sur l'hôte)
+docker run --rm -v "$(pwd)/radarr:/app" alpine sh -c "rm -f /app/radarr.db*"
+
 echo "✅ Radarr database cleaned"
 cd ~/media-stack && docker compose up -d radarr
 "#;

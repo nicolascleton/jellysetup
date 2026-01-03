@@ -35,9 +35,13 @@ pub async fn apply_config_password(
     println!("[Sonarr] Applying master configuration...");
 
     // IMPORTANT: Supprimer la DB Sonarr pour repartir sur une base propre
+    // Utiliser docker run avec Alpine pour éviter sudo
     let cleanup_script = r#"
 cd ~/media-stack && docker compose stop sonarr
-rm -f ~/media-stack/sonarr/sonarr.db*
+
+# Supprimer la DB via docker run (évite sudo sur l'hôte)
+docker run --rm -v "$(pwd)/sonarr:/app" alpine sh -c "rm -f /app/sonarr.db*"
+
 echo "✅ Sonarr database cleaned"
 cd ~/media-stack && docker compose up -d sonarr
 "#;

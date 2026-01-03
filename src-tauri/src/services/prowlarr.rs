@@ -32,9 +32,13 @@ pub async fn apply_config_password(
     println!("[Prowlarr] Applying master configuration...");
 
     // IMPORTANT: Supprimer la DB Prowlarr pour repartir sur une base propre
+    // Utiliser docker run avec Alpine pour éviter sudo
     let cleanup_script = r#"
 cd ~/media-stack && docker compose stop prowlarr
-rm -f ~/media-stack/prowlarr/prowlarr.db*
+
+# Supprimer la DB via docker run (évite sudo sur l'hôte)
+docker run --rm -v "$(pwd)/prowlarr:/app" alpine sh -c "rm -f /app/prowlarr.db*"
+
 echo "✅ Prowlarr database cleaned"
 cd ~/media-stack && docker compose up -d prowlarr
 "#;

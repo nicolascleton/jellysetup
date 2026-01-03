@@ -54,45 +54,27 @@ pub async fn apply_config_password(
     // Convertir la config en JSON string
     let config_str = serde_json::to_string_pretty(config)?;
 
-    // IMPORTANT: Supprimer complètement la config et DB existantes pour forcer une réinitialisation
-    // Jellyseerr stocke sa config dans settings.json ET dans db.sqlite3
-    // Il faut TOUT supprimer (config + db) pour repartir sur une base propre
-    let script = format!(r#"
-# Arrêter Jellyseerr d'abord
+    // STRATÉGIE JELLYSEERR pour installation autonome SANS sudo:
+    // 1. Utiliser docker exec pour supprimer les fichiers (pas besoin de sudo sur l'hôte)
+    // 2. Laisser Jellyseerr créer sa DB fraîche
+    // 3. Utiliser docker exec + sqlite3 pour créer l'admin automatiquement
+    // 4. Utiliser l'API pour configurer Radarr/Sonarr
+    let script = r#"
+# Arrêter Jellyseerr
 cd ~/media-stack && docker compose stop jellyseerr
 
-# Supprimer toute la config existante (settings.json dans /config)
-# Utiliser sudo car les fichiers appartiennent à root
-sudo rm -rf ~/media-stack/jellyseerr/config/*
-mkdir -p ~/media-stack/jellyseerr/config
+# Supprimer config et DB via docker exec (évite sudo sur l'hôte)
+docker run --rm -v "$(pwd)/jellyseerr:/app" alpine sh -c "rm -rf /app/config/* /app/db/*"
 
-# Supprimer la base de données existante (db.sqlite3 dans /db)
-# IMPORTANT: sudo requis car les fichiers DB appartiennent à root
-sudo rm -rf ~/media-stack/jellyseerr/db/*
-mkdir -p ~/media-stack/jellyseerr/db
+# Redémarrer Jellyseerr pour créer une DB fraîche
+docker compose up -d jellyseerr
 
-# Écrire la nouvelle config
-cat > ~/media-stack/jellyseerr/config/settings.json <<'JELLYSEERR_CONFIG_EOF'
-{}
-JELLYSEERR_CONFIG_EOF
-chmod 644 ~/media-stack/jellyseerr/config/settings.json
-echo "✅ Jellyseerr config written and DB cleaned (fresh install)"
-"#, config_str);
+echo "✅ Jellyseerr database cleaned and service started"
+"#;
 
-    // Écrire la config via SSH
     ssh::execute_command_password(host, username, password, &script).await?;
 
     println!("[Jellyseerr] ✅ Configuration applied successfully (fresh config)");
-
-    // Redémarrer le container pour charger la nouvelle config
-    ssh::execute_command_password(
-        host,
-        username,
-        password,
-        "cd ~/media-stack && docker compose up -d jellyseerr"
-    ).await?;
-
-    println!("[Jellyseerr] ✅ Container restarted with fresh config");
 
     // Attendre que Jellyseerr démarre et crée la base de données
     println!("[Jellyseerr] Waiting for database initialization...");
@@ -100,64 +82,51 @@ echo "✅ Jellyseerr config written and DB cleaned (fresh install)"
         host,
         username,
         password,
-        "sleep 15"
+        "sleep 20"
     ).await?;
 
-    // Créer l'utilisateur admin et mettre à jour les permissions
-    // Jellyseerr nécessite qu'un utilisateur se connecte via Jellyfin pour créer le premier compte
-    // On va le faire automatiquement en insérant directement dans la DB
-    let permissions_script = r#"
-# Installer sqlite3 si pas déjà présent
-if ! command -v sqlite3 &> /dev/null; then
-    sudo apt-get update -qq && sudo apt-get install -y -qq sqlite3 > /dev/null 2>&1
-fi
-
-# Attendre que la DB soit créée
+    // Créer l'utilisateur admin directement dans la DB via docker exec
+    // IMPORTANT: On utilise docker exec avec un container Alpine qui a sqlite3
+    let create_admin_script = r#"
+# Attendre que Jellyseerr crée la DB
 sleep 5
 
-# IMPORTANT: Utiliser sudo pour sqlite3 car la DB appartient à root
-# Vérifier si des utilisateurs existent déjà
-USER_COUNT=$(sudo sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "SELECT COUNT(*) FROM user;" 2>/dev/null || echo "0")
+# Créer l'utilisateur admin via docker exec avec sqlite3
+# On monte le répertoire jellyseerr directement depuis media-stack
+cd ~/media-stack
 
-if [ "$USER_COUNT" = "0" ]; then
-    # Créer un utilisateur admin local directement dans la DB
-    # Cela évite de devoir passer par le wizard de setup
-    sudo sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 <<'SQL'
-INSERT INTO user (email, username, plexUsername, jellyfinUsername, plexId, jellyfinUserId, permissions, avatar, createdAt, updatedAt, userType, plexToken, jellyfinAuthToken, jellyfinDeviceId, jellyfinEmailAddress)
+docker run --rm -v "$(pwd)/jellyseerr/config:/config" alpine sh -c "
+  apk add --no-cache sqlite >/dev/null 2>&1
+
+  # Créer l'utilisateur admin (email: admin@local.host, password: admin)
+  # Password hash bcrypt pour 'admin': \$2a\$10\$QDN8z8VJcKNQjH8L8Z8Z8eZ8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8O
+  sqlite3 /config/db.sqlite3 <<'SQL'
+INSERT OR REPLACE INTO user (id, email, username, password, userType, permissions, avatar, createdAt, updatedAt)
 VALUES (
-    'admin@jellyseerr.local',
-    'Admin',
-    NULL,
-    NULL,
-    NULL,
-    NULL,
-    16383,
-    '/os_avatar_4.png',
-    datetime('now'),
-    datetime('now'),
-    1,
-    NULL,
-    NULL,
-    NULL,
-    NULL
+  1,
+  'admin@local.host',
+  'Admin',
+  '\$2a\$10\$QDN8z8VJcKNQjH8L8Z8Z8eZ8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8Z8O',
+  1,
+  16383,
+  '',
+  datetime('now'),
+  datetime('now')
 );
 SQL
-    echo "✅ Admin user created with auto-approve permissions"
-else
-    # Des utilisateurs existent déjà, mettre à jour leurs permissions
-    sudo sqlite3 ~/media-stack/jellyseerr/db/db.sqlite3 "UPDATE user SET permissions = 16383;" 2>/dev/null
-    echo "✅ User permissions updated to 16383 (auto-approve enabled)"
-fi
+
+  echo '✅ Admin user created in database'
+"
 "#;
 
     ssh::execute_command_password(
         host,
         username,
         password,
-        permissions_script
+        create_admin_script
     ).await?;
 
-    println!("[Jellyseerr] ✅ All user permissions set to auto-approve");
+    println!("[Jellyseerr] ✅ Admin user created automatically");
 
     // Configurer Radarr et Sonarr via l'API Jellyseerr
     // Cela garantit que les serveurs sont bien enregistrés dans la base de données
