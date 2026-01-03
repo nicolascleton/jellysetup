@@ -1110,8 +1110,10 @@ pub async fn run_full_installation(
     emit_progress(&window, "structure", 40, "Création structure...", None);
     ssh::execute_command(host, username, private_key,
         "mkdir -p ~/media-stack/{decypharr,jellyfin,radarr,sonarr,prowlarr,jellyseerr,bazarr,logs} && \
-         sudo mkdir -p /mnt/decypharr && \
-         sudo chown $USER:$USER /mnt/decypharr"
+         sudo mkdir -p /mnt/decypharr /mnt/media && \
+         sudo chown $USER:$USER /mnt/decypharr /mnt/media && \
+         ln -sf /mnt/decypharr/qbit/radarr /mnt/media/movies && \
+         ln -sf /mnt/decypharr/qbit/tv-sonarr /mnt/media/series"
     ).await?;
 
     // Étape 5: Écrire le docker-compose.yml
@@ -1610,7 +1612,10 @@ pub async fn run_full_installation(
             if !radarr_api_key.is_empty() && !sonarr_api_key.is_empty() {
                 let jellyseerr_config = format!(r#"
 # Récupérer l'API key de Jellyseerr depuis settings.json
-API_KEY=$(cat ~/media-stack/jellyseerr/config/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+API_KEY=$(cat ~/media-stack/jellyseerr/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Récupérer l'IP locale de l'hôte
+HOST_IP=$(hostname -I | awk '{{print $1}}')
 
 # Attendre que Jellyseerr soit prêt
 sleep 5
@@ -1621,13 +1626,13 @@ curl -s -X POST "http://localhost:5055/api/v1/settings/radarr" \
   -H "Content-Type: application/json" \
   -d '{{
     "name": "Radarr",
-    "hostname": "radarr",
+    "hostname": "'"$HOST_IP"'",
     "port": 7878,
     "apiKey": "{}",
     "useSsl": false,
     "activeProfileId": 4,
     "activeProfileName": "HD-1080p",
-    "activeDirectory": "/mnt/decypharr/movies",
+    "activeDirectory": "/mnt/media/movies",
     "is4k": false,
     "minimumAvailability": "released",
     "isDefault": true,
@@ -1640,13 +1645,13 @@ curl -s -X POST "http://localhost:5055/api/v1/settings/sonarr" \
   -H "Content-Type: application/json" \
   -d '{{
     "name": "Sonarr",
-    "hostname": "sonarr",
+    "hostname": "'"$HOST_IP"'",
     "port": 8989,
     "apiKey": "{}",
     "useSsl": false,
     "activeProfileId": 4,
     "activeProfileName": "HD-1080p",
-    "activeDirectory": "/mnt/decypharr/tv",
+    "activeDirectory": "/mnt/media/series",
     "is4k": false,
     "enableSeasonFolders": true,
     "isDefault": true,
@@ -3251,7 +3256,10 @@ pub async fn run_full_installation_password(
             if !radarr_api_key.is_empty() && !sonarr_api_key.is_empty() {
                 let jellyseerr_config = format!(r#"
 # Récupérer l'API key de Jellyseerr depuis settings.json
-API_KEY=$(cat ~/media-stack/jellyseerr/config/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+API_KEY=$(cat ~/media-stack/jellyseerr/settings.json | grep -o '"apiKey":"[^"]*"' | head -1 | cut -d'"' -f4)
+
+# Récupérer l'IP locale de l'hôte
+HOST_IP=$(hostname -I | awk '{{print $1}}')
 
 # Attendre que Jellyseerr soit prêt
 sleep 5
@@ -3262,13 +3270,13 @@ curl -s -X POST "http://localhost:5055/api/v1/settings/radarr" \
   -H "Content-Type: application/json" \
   -d '{{
     "name": "Radarr",
-    "hostname": "radarr",
+    "hostname": "'"$HOST_IP"'",
     "port": 7878,
     "apiKey": "{}",
     "useSsl": false,
     "activeProfileId": 4,
     "activeProfileName": "HD-1080p",
-    "activeDirectory": "/mnt/decypharr/movies",
+    "activeDirectory": "/mnt/media/movies",
     "is4k": false,
     "minimumAvailability": "released",
     "isDefault": true,
@@ -3281,13 +3289,13 @@ curl -s -X POST "http://localhost:5055/api/v1/settings/sonarr" \
   -H "Content-Type: application/json" \
   -d '{{
     "name": "Sonarr",
-    "hostname": "sonarr",
+    "hostname": "'"$HOST_IP"'",
     "port": 8989,
     "apiKey": "{}",
     "useSsl": false,
     "activeProfileId": 4,
     "activeProfileName": "HD-1080p",
-    "activeDirectory": "/mnt/decypharr/tv",
+    "activeDirectory": "/mnt/media/series",
     "is4k": false,
     "enableSeasonFolders": true,
     "isDefault": true,
